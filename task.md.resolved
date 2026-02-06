@@ -1,0 +1,26 @@
+# Task: Enhance AQI OLED Display Initialization
+
+## Checklist
+- [x] Create helper function to simplify printing text to OLED
+- [x] Add welcome message with system name and version
+- [x] Add GSM module validation
+- [x] Add signal strength validation
+- [x] Add GPRS connectivity validation
+- [x] Remove duplicate GPRS logic from loop()
+- [x] Add enhanced debugging for connection test
+  - [x] GPRS active status verification
+  - [x] Local IP retrieval
+  - [x] Dual connection test (domain + IP fallback)
+- [x] Create ensureConnected() helper for data transmission
+  - [x] Quick GPRS status check
+  - [x] Auto-reconnect on disconnect
+  - [x] Usage examples and documentation
+- [x] Create data structure for all sensor parameters
+  - [x] Air quality sensors (PM1.0, PM2.5, PM10, CO, CO2, O3, NH3, NO2, SO2, TVOC)
+  - [x] Environmental sensors (Temperature, Humidity, LDR)
+  - [x] Power monitoring (Voltage, Current, Power Consumption)
+- [x] Create server upload function with JSON payload
+  - [x] JSON builder for all 17 parameters
+  - [x] HTTP POST to configurable endpoint
+  - [x] Connection validation and error handling
+  - [x] Usage examples and complete guide

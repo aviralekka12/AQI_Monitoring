@@ -1,0 +1,118 @@
+// ===== AQI CALCULATION FUNCTIONS (US EPA Standard) =====
+
+// Helper function to calculate AQI from concentration using breakpoint table
+int calculateAQI(float concentration, float Clow, float Chigh, int Ilow, int Ihigh) {
+  if (concentration <= 0) return 0;
+  return round(((Ihigh - Ilow) / (Chigh - Clow)) * (concentration - Clow) + Ilow);
+}
+
+// Calculate PM2.5 sub-index (24-hour average, μg/m³)
+int calculatePM25_AQI(float pm25) {
+  if (pm25 <= 12.0) return calculateAQI(pm25, 0.0, 12.0, 0, 50);
+  else if (pm25 <= 35.4) return calculateAQI(pm25, 12.1, 35.4, 51, 100);
+  else if (pm25 <= 55.4) return calculateAQI(pm25, 35.5, 55.4, 101, 150);
+  else if (pm25 <= 150.4) return calculateAQI(pm25, 55.5, 150.4, 151, 200);
+  else if (pm25 <= 250.4) return calculateAQI(pm25, 150.5, 250.4, 201, 300);
+  else if (pm25 <= 500.4) return calculateAQI(pm25, 250.5, 500.4, 301, 500);
+  else return 500; // Hazardous beyond scale
+}
+
+// Calculate PM10 sub-index (24-hour average, μg/m³)
+int calculatePM10_AQI(float pm10) {
+  if (pm10 <= 54) return calculateAQI(pm10, 0, 54, 0, 50);
+  else if (pm10 <= 154) return calculateAQI(pm10, 55, 154, 51, 100);
+  else if (pm10 <= 254) return calculateAQI(pm10, 155, 254, 101, 150);
+  else if (pm10 <= 354) return calculateAQI(pm10, 255, 354, 151, 200);
+  else if (pm10 <= 424) return calculateAQI(pm10, 355, 424, 201, 300);
+  else if (pm10 <= 604) return calculateAQI(pm10, 425, 604, 301, 500);
+  else return 500;
+}
+
+// Calculate O3 sub-index (8-hour average, ppb)
+int calculateO3_AQI(float o3) {
+  if (o3 <= 54) return calculateAQI(o3, 0, 54, 0, 50);
+  else if (o3 <= 70) return calculateAQI(o3, 55, 70, 51, 100);
+  else if (o3 <= 85) return calculateAQI(o3, 71, 85, 101, 150);
+  else if (o3 <= 105) return calculateAQI(o3, 86, 105, 151, 200);
+  else if (o3 <= 200) return calculateAQI(o3, 106, 200, 201, 300);
+  else return 500;
+}
+
+// Calculate CO sub-index (8-hour average, ppm)
+int calculateCO_AQI(float co) {
+  if (co <= 4.4) return calculateAQI(co, 0.0, 4.4, 0, 50);
+  else if (co <= 9.4) return calculateAQI(co, 4.5, 9.4, 51, 100);
+  else if (co <= 12.4) return calculateAQI(co, 9.5, 12.4, 101, 150);
+  else if (co <= 15.4) return calculateAQI(co, 12.5, 15.4, 151, 200);
+  else if (co <= 30.4) return calculateAQI(co, 15.5, 30.4, 201, 300);
+  else if (co <= 50.4) return calculateAQI(co, 30.5, 50.4, 301, 500);
+  else return 500;
+}
+
+// Calculate NO2 sub-index (1-hour average, ppb)
+int calculateNO2_AQI(float no2) {
+  if (no2 <= 53) return calculateAQI(no2, 0, 53, 0, 50);
+  else if (no2 <= 100) return calculateAQI(no2, 54, 100, 51, 100);
+  else if (no2 <= 360) return calculateAQI(no2, 101, 360, 101, 150);
+  else if (no2 <= 649) return calculateAQI(no2, 361, 649, 151, 200);
+  else if (no2 <= 1249) return calculateAQI(no2, 650, 1249, 201, 300);
+  else if (no2 <= 2049) return calculateAQI(no2, 1250, 2049, 301, 500);
+  else return 500;
+}
+
+// Calculate SO2 sub-index (1-hour average, ppb)
+int calculateSO2_AQI(float so2) {
+  if (so2 <= 35) return calculateAQI(so2, 0, 35, 0, 50);
+  else if (so2 <= 75) return calculateAQI(so2, 36, 75, 51, 100);
+  else if (so2 <= 185) return calculateAQI(so2, 76, 185, 101, 150);
+  else if (so2 <= 304) return calculateAQI(so2, 186, 304, 151, 200);
+  else if (so2 <= 604) return calculateAQI(so2, 305, 604, 201, 300);
+  else if (so2 <= 1004) return calculateAQI(so2, 605, 1004, 301, 500);
+  else return 500;
+}
+
+// Calculate overall AQI (max of all sub-indices) and identify dominant pollutant
+void calculateOverallAQI() {
+  int pm25_aqi = calculatePM25_AQI(sensorData.pm2_5);
+  int pm10_aqi = calculatePM10_AQI(sensorData.pm10);
+  int o3_aqi = calculateO3_AQI(sensorData.o3);
+  int co_aqi = calculateCO_AQI(sensorData.co);
+  int no2_aqi = calculateNO2_AQI(sensorData.no2);
+  int so2_aqi = calculateSO2_AQI(sensorData.so2);
+  
+  // Find maximum AQI
+  sensorData.aqi = pm25_aqi;
+  strcpy(sensorData.dominant_pollutant, "PM2.5");
+  
+  if (pm10_aqi > sensorData.aqi) {
+    sensorData.aqi = pm10_aqi;
+    strcpy(sensorData.dominant_pollutant, "PM10");
+  }
+  if (o3_aqi > sensorData.aqi) {
+    sensorData.aqi = o3_aqi;
+    strcpy(sensorData.dominant_pollutant, "O3");
+  }
+  if (co_aqi > sensorData.aqi) {
+    sensorData.aqi = co_aqi;
+    strcpy(sensorData.dominant_pollutant, "CO");
+  }
+  if (no2_aqi > sensorData.aqi) {
+    sensorData.aqi = no2_aqi;
+    strcpy(sensorData.dominant_pollutant, "NO2");
+  }
+  if (so2_aqi > sensorData.aqi) {
+    sensorData.aqi = so2_aqi;
+    strcpy(sensorData.dominant_pollutant, "SO2");
+  }
+}
+
+// Helper function to get AQI category name
+const char* getAQICategory(int aqi) {
+  if (aqi <= 50) return "Good";
+  else if (aqi <= 100) return "Moderate";
+  else if (aqi <= 150) return "Unhealthy SG";
+  else if (aqi <= 200) return "Unhealthy";
+  else if (aqi <= 300) return "Very Unhealthy";
+  else return "Hazardous";
+}
+

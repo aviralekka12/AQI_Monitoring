@@ -1,0 +1,113 @@
+# How to Send Data with Connection Validation
+
+## Using [ensureConnected()](file:///c:/Users/ALPHA-TECH/Documents/Arduino/AQI_OLED_1106/AQI_OLED_1106.ino#126-156) Before Sending Data
+
+Before sending any data to your server, call [ensureConnected()](file:///c:/Users/ALPHA-TECH/Documents/Arduino/AQI_OLED_1106/AQI_OLED_1106.ino#126-156) to validate GPRS connectivity. This function:
+
+✅ Checks if GPRS is still connected  
+✅ Automatically reconnects if disconnected (up to 3 attempts)  
+✅ Returns `true` if connected, `false` if failed  
+✅ Very fast - only reconnects if needed  
+
+## Example Usage
+
+### Basic Example
+
+```cpp
+void loop() {
+  // Your sensor reading code here
+  int aqiValue = readAQI();
+  
+  // Validate connection before sending
+  if (ensureConnected()) {
+    // Connection OK, send data
+    sendDataToServer(aqiValue);
+  } else {
+    // Connection failed
+    Serial.println("Cannot send data - no connection!");
+    // Maybe store data locally to send later
+  }
+  
+  delay(60000);  // Send every minute
+}
+```
+
+### Advanced Example with HTTP Request
+
+```cpp
+void sendAQIData(int aqi, float temp, float humidity) {
+  // Check connection first
+  if (!ensureConnected()) {
+    Serial.println("Send failed: No connection");
+    return;
+  }
+  
+  // Build your data
+  String payload = "{\"aqi\":" + String(aqi) + 
+                   ",\"temp\":" + String(temp) + 
+                   ",\"humidity\":" + String(humidity) + "}";
+  
+  // Make HTTP request
+  http_client.beginRequest();
+  http_client.post("/api/data");
+  http_client.sendHeader("Content-Type", "application/json");
+  http_client.sendHeader("Content-Length", payload.length());
+  http_client.beginBody();
+  http_client.print(payload);
+  http_client.endRequest();
+  
+  // Check response
+  int statusCode = http_client.responseStatusCode();
+  Serial.print("Response: ");
+  Serial.println(statusCode);
+}
+```
+
+### With Retry Logic
+
+```cpp
+bool sendDataWithRetry(String data, int maxRetries = 2) {
+  for (int retry = 0; retry <= maxRetries; retry++) {
+    // Ensure connected
+    if (!ensureConnected()) {
+      Serial.println("Connection check failed");
+      delay(2000);
+      continue;
+    }
+    
+    // Try to send
+    http_client.post("/api/data");
+    http_client.sendHeader("Content-Type", "application/json");
+    http_client.print(data);
+    
+    int status = http_client.responseStatusCode();
+    if (status == 200) {
+      Serial.println("Data sent successfully!");
+      return true;
+    }
+    
+    Serial.print("Send failed, retry ");
+    Serial.print(retry + 1);
+    Serial.print("/");
+    Serial.println(maxRetries);
+    delay(1000);
+  }
+  
+  return false;
+}
+```
+
+## Key Points
+
+- **Always call before sending** - Validates connection is active
+- **Fast operation** - Only takes milliseconds if already connected
+- **Auto-reconnect** - Handles temporary disconnections automatically
+- **No full internet test needed** - Just checks GPRS status
+- **Returns boolean** - Easy to check success/failure
+
+## When to Use
+
+✅ **DO use** before every HTTP request  
+✅ **DO use** before sending data batches  
+✅ **DO use** in periodic upload functions  
+❌ **DON'T use** multiple times in rapid succession (it already handles retries)
