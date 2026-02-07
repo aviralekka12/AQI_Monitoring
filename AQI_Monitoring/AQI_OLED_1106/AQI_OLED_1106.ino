@@ -25,9 +25,45 @@
 #define VOC_PIN A0   // DFRobot MEMS VOC
 
 // DHT Sensor object
+// DHT Sensor object
 DHT dht(DHT_PIN, DHT_TYPE);
 
-#define EEPROM_INTERVAL_ADDR 0 // Address to store interval (4 bytes)
+// ===== CALIBRATION & EEPROM =====
+// EEPROM Address Map
+#define EEPROM_INTERVAL_ADDR 0     // 4 bytes
+#define EEPROM_CALIB_ADDR 10       // Start of calibration data
+
+// Measured Load Resistors (RL) in kOhms
+#define RL_MQ7 0.694
+#define RL_MQ2 0.794
+#define RL_MQ131 0.698
+#define RL_MQ137 0.783
+#define RL_MQ135 0.793
+#define RL_DEFAULT 10.0 // For others if needed
+
+struct CalibData {
+  float r0_co;    // MQ7
+  float r0_co2;   // MQ135
+  float r0_o3;    // MQ131
+  float r0_nh3;   // MQ137
+  float r0_so2;   // MQ2 (or dedicated)
+  float r0_no2;   // Fermion NO2 (Baseline Offset or Sensitivity)
+  float r0_tvoc;  // MEMS VOC (Baseline)
+  uint8_t initialized; // Magic byte (0xA5)
+};
+
+CalibData calib = {
+    10.0, 76.63, 100.0, 50.0, 9.83, 2.5, 0.6, 0}; // Default values
+
+// ===== ROTARY ENCODER =====
+#define ENC_SW 32
+#define ENC_DT 34
+#define ENC_CLK 36
+
+int lastClk = HIGH;
+unsigned long lastButtonPress = 0;
+bool menuActive = false;
+
 
 // Forward declarations
 void esp32_status_update();
@@ -204,6 +240,27 @@ void printText(String text, int x = 0, int y = 0, int size = 1) {
 
 // ===== EEPROM FUNCTIONS =====
 
+void saveCalib() {
+  EEPROM.put(EEPROM_CALIB_ADDR, calib);
+  Serial.println("Calibration data saved to EEPROM.");
+}
+
+void loadCalib() {
+  CalibData stored;
+  EEPROM.get(EEPROM_CALIB_ADDR, stored);
+  if (stored.initialized == 0xA5) {
+    calib = stored;
+    Serial.println("Calibration loaded.");
+  } else {
+    Serial.println("No calibration found, using defaults.");
+    calib.initialized = 0xA5;
+    saveCalib(); // Save defaults
+  }
+  // Print loaded values for debug
+  Serial.print("R0 CO: "); Serial.println(calib.r0_co);
+  Serial.print("R0 CO2: "); Serial.println(calib.r0_co2);
+}
+
 // Save interval to EEPROM
 void saveIntervalToEEPROM(unsigned long interval) {
   EEPROM.put(EEPROM_INTERVAL_ADDR, interval);
@@ -226,6 +283,7 @@ unsigned long loadIntervalFromEEPROM() {
   Serial.println(interval);
   return interval;
 }
+
 
 // ===== AQI CALCULATION FUNCTIONS (US EPA Standard) =====
 
@@ -445,61 +503,40 @@ bool readPMData() {
 
 // Read MQ-7 CO sensor (ppm)
 // Using datasheet-accurate parameters
+// Read MQ-7 CO sensor (ppm)
 float readCO() {
   int rawValue = analogRead(MQ7_PIN);
   float voltage = rawValue * (5.0 / 1023.0);
 
-  // Avoid division by zero
-  if (voltage < 0.1)
-    voltage = 0.1;
+  if (voltage < 0.1) voltage = 0.1;
 
-  // Calculate Rs (sensor resistance)
-  float RL = 10.0; // Load resistor from datasheet (10kΩ typical)
-  float Rs = ((5.0 * RL) / voltage) - RL;
-
-  // R0 from calibration (default: typical value)
-  // TODO: Load from EEPROM after calibration
-  float R0 = 10.0; // NEEDS CALIBRATION! Clean air R0
-
-  // Calculate Rs/R0 ratio
-  float ratio = Rs / R0;
+  float Rs = ((5.0 * RL_MQ7) / voltage) - RL_MQ7;
+  float ratio = Rs / calib.r0_co;
 
   // MQ-7 datasheet curve: ppm = 10^((log(Rs/R0) - 0.74) / -0.36)
-  // From sensitivity curve analysis
   float ppm = pow(10, ((log10(ratio) - 0.74) / -0.36));
 
-  // Temperature & Humidity compensation (standard: 20°C, 65% RH)
-  // Approximate correction factors from datasheet variations
   float tempCompensation = 1.0 - ((sensorData.temperature - 20.0) * 0.004);
   float humidityCompensation = 1.0 - ((sensorData.humidity - 65.0) * 0.003);
   ppm = ppm * tempCompensation * humidityCompensation;
 
-  return constrain(ppm, 1, 1000);
+  return constrain(ppm, 0, 1000);
 }
+
 
 // Read MQ-135 for CO2 (ppm)
 // NOTE: Requires R0 calibration in clean air (400ppm CO2)
+// Read MQ-135 for CO2 (ppm)
 float readCO2() {
   int rawValue = analogRead(MQ135_PIN);
   float voltage = rawValue * (5.0 / 1023.0);
 
-  // Calculate Rs (sensor resistance)
-  // Assuming RL = 10kΩ (check your MQ135 module!)
-  float RL = 10.0; // Load resistance in kΩ
-  float Rs = ((5.0 * RL) / voltage) - RL;
+  float Rs = ((5.0 * RL_MQ135) / voltage) - RL_MQ135;
+  float ratio = Rs / calib.r0_co2;
 
-  // R0 should be calibrated in clean air (400ppm CO2)
-  // For now, using typical R0 value. TODO: Calibrate and store in EEPROM
-  float R0 = 76.63; // Typical value, NEEDS CALIBRATION!
-
-  // Calculate Rs/R0 ratio
-  float ratio = Rs / R0;
-
-  // MQ135 datasheet curve for CO2: ppm = 116.6020682 * (ratio ^ -2.769034857)
-  // Logarithmic form: log(ppm) = log(116.6) - 2.769 * log(ratio)
+  // MQ135 datasheet: ppm = 116.602 * (ratio ^ -2.769)
   float ppm = 116.6020682 * pow(ratio, -2.769034857);
 
-  // Temperature & Humidity compensation (standard: 20°C, 65% RH)
   float tempCompensation = 1.0 - ((sensorData.temperature - 20.0) * 0.005);
   float humidityCompensation = 1.0 - ((sensorData.humidity - 65.0) * 0.004);
   ppm = ppm * tempCompensation * humidityCompensation;
@@ -507,120 +544,84 @@ float readCO2() {
   return constrain(ppm, 10, 10000);
 }
 
+
 // Read MQ-131 O3 sensor (ppb)
 // Using datasheet curve for low-concentration version
+// Read MQ-131 O3 sensor (ppb)
 float readO3() {
   int rawValue = analogRead(MQ131_PIN);
   float voltage = rawValue * (5.0 / 1023.0);
+  if (voltage < 0.1) voltage = 0.1;
 
-  // Avoid division by zero
-  if (voltage < 0.1)
-    voltage = 0.1;
+  float Rs = ((5.0 * RL_MQ131) / voltage) - RL_MQ131;
+  float ratio = Rs / calib.r0_o3;
 
-  // Calculate Rs - MQ131 typically uses 47kΩ for low-conc version
-  float RL = 47.0; // Load resistor (verify on your module!)
-  float Rs = ((5.0 * RL) / voltage) - RL;
-
-  // R0 from calibration
-  float R0 = 100.0; // NEEDS CALIBRATION! Typical clean air R0
-
-  // Calculate ratio
-  float ratio = Rs / R0;
-
-  // From datasheet sensitivity curve: ppb = 10^((log(Rs/R0) + 0.92) / -0.44)
+  // ppb = 10^((log(Rs/R0) + 0.92) / -0.44)
   float ppb = pow(10, ((log10(ratio) + 0.92) / -0.44));
 
-  // Temperature & Humidity compensation
   float tempCompensation = 1.0 - ((sensorData.temperature - 20.0) * 0.006);
   float humidityCompensation = 1.0 - ((sensorData.humidity - 65.0) * 0.003);
   ppb = ppb * tempCompensation * humidityCompensation;
 
-  return constrain(ppb, 1, 500);
+  return constrain(ppb, 0, 1000);
 }
+
 
 // Read MQ-137 NH3 sensor (ppm)
 // Using MQ137 datasheet specifications (5-500ppm range)
+// Read MQ-137 NH3 sensor (ppm)
 float readNH3() {
   int rawValue = analogRead(MQ137_PIN);
   float voltage = rawValue * (5.0 / 1023.0);
+  if (voltage < 0.1) voltage = 0.1;
 
-  // Avoid division by zero
-  if (voltage < 0.1)
-    voltage = 0.1;
+  float Rs = ((5.0 * RL_MQ137) / voltage) - RL_MQ137;
+  float ratio = Rs / calib.r0_nh3;
 
-  // Calculate Rs - MQ137 typically uses 47kΩ
-  float RL = 47.0;
-  float Rs = ((5.0 * RL) / voltage) - RL;
-
-  // R0 from calibration
-  // Datasheet: Rs(in air)/Rs(500ppm NH3) ≥ 2
-  float R0 = 50.0; // NEEDS CALIBRATION!
-
-  float ratio = Rs / R0;
-
-  // MQ137 curve for NH3 (5-500ppm detection range)
+  // ppm = 50.0 * pow(ratio, -1.2) - calibrated to 50ppm point
   float ppm = 50.0 * pow(ratio, -1.2);
 
-  // Temperature & Humidity compensation
   float tempCompensation = 1.0 - ((sensorData.temperature - 20.0) * 0.005);
   float humidityCompensation = 1.0 - ((sensorData.humidity - 55.0) * 0.004);
   ppm = ppm * tempCompensation * humidityCompensation;
 
-  return constrain(ppm, 5, 500);
+  return constrain(ppm, 0, 500);
 }
+
 
 // Read GM-102B MEMS NO2 sensor (ppm)
 // Using datasheet specifications
+// Read GM-102B MEMS NO2 sensor (ppm)
 float readNO2() {
   int rawValue = analogRead(NO2_PIN);
   float voltage = rawValue * (5.0 / 1023.0);
 
-  // GM-102B datasheet specs:
-  // - Detection range: 0.1-10 ppm NO2
-  // - Heater voltage: 1.8V±0.1V
-  // - Circuit voltage: 5.0V±0.1V
-  // - Rs: 10KΩ~1000KΩ (in 5ppm NO2)
-  // - Sensitivity S: R0(air)/Rs(5ppm NO2) ≤ 0.5
-
-  // Baseline voltage in clean air (needs calibration)
-  float baselineVoltage = 2.5; // NEEDS CALIBRATION! Typical mid-range
-
-  // Calculate Rs from voltage
-  // Higher NO2 → Lower Rs → Higher voltage (inverse relationship)
+  // Baseline voltage from calibration
+  float baselineVoltage = calib.r0_no2;
   float deltaV = voltage - baselineVoltage;
+  float ppm = deltaV * 2.0; // Sensitivity
 
-  // Map voltage change to ppm (0.1-10 ppm range)
-  // This is a simplified linear approximation
-  // For accurate results, calibrate with known NO2 concentrations
-  float ppm = deltaV * 2.0; // Sensitivity factor (adjust after calibration)
+  // Clamp - don't show negative if below baseline
+  if (ppm < 0) ppm = 0;
 
-  return constrain(ppm, 0.1, 10.0);
+  return constrain(ppm, 0, 10.0);
 }
+
 
 // Read MQ-2 for SO2 / Smoke (ppb)
 // NOTE: MQ2 is primarily for LPG/smoke, SO2 sensitivity is limited
 // Requires R0 calibration in clean air
+// Read MQ-2 for SO2 / Smoke (ppb)
 float readSO2() {
   int rawValue = analogRead(MQ2_PIN);
   float voltage = rawValue * (5.0 / 1023.0);
 
-  // Calculate Rs (sensor resistance)
-  float RL = 5.0; // MQ2 typically uses 5kΩ load resistor
-  float Rs = ((5.0 * RL) / voltage) - RL;
+  float Rs = ((5.0 * RL_MQ2) / voltage) - RL_MQ2;
+  float ratio = Rs / calib.r0_so2;
 
-  // R0 should be calibrated in clean air
-  // For now, using typical R0 value. TODO: Calibrate and store in EEPROM
-  float R0 = 9.83; // Typical value, NEEDS CALIBRATION!
-
-  // Calculate Rs/R0 ratio
-  float ratio = Rs / R0;
-
-  // MQ2 curve for smoke/sulfur compounds (approximate)
-  // Note: This is NOT accurate for SO2! Consider replacing with proper SO2
-  // sensor
+  // MQ2 curve
   float ppb = 50.0 * pow(ratio, -1.4);
 
-  // Temperature & Humidity compensation
   float tempCompensation = 1.0 - ((sensorData.temperature - 20.0) * 0.005);
   float humidityCompensation = 1.0 - ((sensorData.humidity - 65.0) * 0.003);
   ppb = ppb * tempCompensation * humidityCompensation;
@@ -628,27 +629,22 @@ float readSO2() {
   return constrain(ppb, 0, 1000);
 }
 
+
 // Read MEMS VOC sensor (GM-502B)
 // Using datasheet specifications
+// Read GM-502B MEMS VOC
 float readTVOC() {
   int rawValue = analogRead(VOC_PIN);
   float voltage = rawValue * (5.0 / 1023.0);
 
-  // GM-502B datasheet: Detection range 1-500ppm
-  // Higher voltage = Lower Rs = Higher VOC concentration
-  // Baseline voltage should be calibrated in clean air
-
-  float baselineVoltage = 0.6; // NEEDS CALIBRATION! Clean air baseline
-
-  // Calculate relative change
+  float baselineVoltage = calib.r0_tvoc; // Baseline
   float deltaV = voltage - baselineVoltage;
-
-  // Map to ppb (sensitivity ratio ≥3.0 from datasheet)
-  // Approximate mapping for ethanol/VOC
   float ppb = (deltaV / (5.0 - baselineVoltage)) * 1000;
 
+  if (ppb < 0) ppb = 0;
   return constrain(ppb, 0, 2000);
 }
+
 
 // Function to read all sensors and populate sensorData
 void readAllSensors() {
@@ -1114,6 +1110,328 @@ void data_send_update() {
   }
 }
 
+// ===== MENU & CALIBRATION SYSTEM =====
+
+void checkEncoder();
+void drawMenu();
+
+// Menu Variables
+int menuState = 0; // 0=None, 1=Main, 2=CalibSelect, 3=SetPPM, 4=Sampling, 5=NetInfo, 6=Reset
+int menuSelection = 0;
+int maxSelection = 0;
+bool redraw = true;
+int selectedSensorIndex = 0;
+float targetPPM = 0.0;
+unsigned long calibStartTime = 0;
+const char* sensorNames[] = {"CO", "CO2", "O3", "NH3", "NO2", "SO2", "TVOC"};
+
+// Display Helper
+void centerText(String text, int y, int size = 1) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.setTextSize(size);
+  display.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+  int x = (SCREEN_WIDTH - w) / 2;
+  display.setCursor(x, y);
+  display.print(text);
+}
+
+// Perform Calculation and Save
+void performCalibration() {
+  display.clearDisplay();
+  centerText("Calibrating...", 20, 1);
+  display.display();
+
+  long rawSum = 0;
+  int samples = 20;
+  int pin = 0;
+  float rl = 10.0;
+
+  // Map index to PIN and RL
+  switch(selectedSensorIndex) {
+    case 0: pin = MQ7_PIN; rl = RL_MQ7; break;
+    case 1: pin = MQ135_PIN; rl = RL_MQ135; break;
+    case 2: pin = MQ131_PIN; rl = RL_MQ131; break;
+    case 3: pin = MQ137_PIN; rl = RL_MQ137; break;
+    case 4: pin = NO2_PIN; rl = 0; break;
+    case 5: pin = MQ2_PIN; rl = RL_MQ2; break;
+    case 6: pin = VOC_PIN; rl = 0; break;
+  }
+
+  // Take Samples
+  for(int i=0; i<samples; i++) {
+    rawSum += analogRead(pin);
+    delay(100);
+  }
+  float avgRaw = rawSum / (float)samples;
+  float voltage = avgRaw * (5.0 / 1023.0);
+  if(voltage < 0.01) voltage = 0.01;
+
+  // Calculate new R0/Baseline
+  float newVal = 0;
+
+  if (selectedSensorIndex == 0) { // CO (MQ7)
+    float rs = ((5.0 * rl) / voltage) - rl;
+    float exponent = -0.36 * log10(targetPPM) + 0.74;
+    float expectedRatio = pow(10, exponent);
+    newVal = rs / expectedRatio;
+    calib.r0_co = newVal;
+  }
+  else if (selectedSensorIndex == 1) { // CO2 (MQ135)
+    float rs = ((5.0 * rl) / voltage) - rl;
+    float expectedRatio = pow((targetPPM / 116.602), (1.0 / -2.769));
+    newVal = rs / expectedRatio;
+    calib.r0_co2 = newVal;
+  }
+  else if (selectedSensorIndex == 2) { // O3 (MQ131)
+     float rs = ((5.0 * rl) / voltage) - rl;
+     float exponent = -0.44 * log10(targetPPM) - 0.92;
+     float expectedRatio = pow(10, exponent);
+     newVal = rs / expectedRatio;
+     calib.r0_o3 = newVal;
+  }
+  else if (selectedSensorIndex == 3) { // NH3 (MQ137)
+    float rs = ((5.0 * rl) / voltage) - rl;
+    float expectedRatio = pow((targetPPM/50.0), (1.0/-1.2));
+    newVal = rs / expectedRatio;
+    calib.r0_nh3 = newVal;
+  }
+  else if (selectedSensorIndex == 4) { // NO2 (Fermion)
+    newVal = voltage; // Baseline Voltage
+    calib.r0_no2 = newVal;
+  }
+  else if (selectedSensorIndex == 5) { // SO2 (MQ2)
+    float rs = ((5.0 * rl) / voltage) - rl;
+    float expectedRatio = pow((targetPPM/50.0), (1.0/-1.4));
+    newVal = rs / expectedRatio;
+    calib.r0_so2 = newVal;
+  }
+  else if (selectedSensorIndex == 6) { // TVOC
+    newVal = voltage; // Baseline
+    calib.r0_tvoc = newVal;
+  }
+
+  saveCalib();
+  delay(1000);
+  menuState = 2; // Back to sensor select
+  redraw = true;
+}
+
+void handleMenu() {
+  if (!menuActive) return;
+
+  if (redraw) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SH110X_WHITE);
+
+    int lineHeight = 13; // 8px font + 5px space
+    int startY = 12; // Title height + space
+
+    if (menuState == 1) { // Main Menu
+      centerText("=== MENU ===", 0, 1);
+      display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+      
+      const char* mainItems[] = {"1. Calibrate", "2. Net Config", "3. Reset", "4. About", "5. Exit"};
+      int totalItems = 5;
+      maxSelection = totalItems - 1;
+
+      // Scrolling Window (Show 4 lines max)
+      int windowSize = 4;
+      int startIdx = 0;
+      if (menuSelection >= windowSize) startIdx = menuSelection - windowSize + 1;
+
+      for(int i=0; i<windowSize; i++) {
+         int idx = startIdx + i;
+         if (idx < totalItems) {
+             int y = startY + (i * lineHeight);
+             display.setCursor(0, y);
+             if(idx == menuSelection) display.print("> "); else display.print("  ");
+             display.print(mainItems[idx]);
+         }
+      }
+    }
+    else if (menuState == 2) { // Calibration Select
+      centerText("= SENSORS =", 0, 1);
+      display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+
+      int totalItems = 8; // 7 Sensors + Back
+      maxSelection = totalItems - 1;
+      
+      int windowSize = 4;
+      int startIdx = 0;
+      if (menuSelection >= windowSize) startIdx = menuSelection - windowSize + 1;
+
+      for(int i=0; i<windowSize; i++) {
+         int idx = startIdx + i;
+         if (idx < totalItems) {
+            int y = startY + (i * lineHeight);
+            display.setCursor(0, y);
+            if(idx == menuSelection) display.print("> "); else display.print("  ");
+            
+            if(idx < 7) display.print(sensorNames[idx]);
+            else display.print("Back");
+         }
+      }
+    }
+    else if (menuState == 3) { // Calibration Set PPM
+      centerText("= SET TARGET =", 0, 1);
+      display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+      
+      display.setCursor(0, 15);
+      display.print("Sensor: "); display.println(sensorNames[selectedSensorIndex]);
+      
+      // Large Value
+      String valStr = String(targetPPM, 1);
+      if(selectedSensorIndex == 2 || selectedSensorIndex == 4 || selectedSensorIndex == 5 || selectedSensorIndex == 6)
+        valStr += " ppb";
+      else 
+        valStr += " ppm";
+      
+      centerText(valStr, 30, 2);
+      
+      centerText("[Click to Save]", 55, 1);
+      maxSelection = 10000;
+    }
+
+    else if (menuState == 5) { // Network Config Submenu
+      centerText("= NET CONFIG =", 0, 1);
+      display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+
+      const char* netItems[] = {"1. Status", "2. SSID", "3. Password", "4. Back"};
+      int totalItems = 4;
+      maxSelection = totalItems - 1;
+      
+      for(int i=0; i<totalItems; i++) {
+        int y = startY + (i * lineHeight);
+        display.setCursor(0, y);
+        if(i == menuSelection) display.print("> "); else display.print("  ");
+        display.print(netItems[i]);
+      }
+    }
+    else if (menuState == 51) { // Net: Status
+       centerText("= STATUS =", 0, 1);
+       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       centerText(wifi_status ? "Connected" : "Disconnected", 25, 1);
+       centerText("[Click to Back]", 50, 1);
+    }
+    else if (menuState == 52) { // Net: SSID
+       centerText("= SSID =", 0, 1);
+       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       centerText("SSID: JIOFI_xxxx", 20, 1);
+       centerText("(View Only)", 35, 1);
+       centerText("[Click to Back]", 50, 1);
+    }
+    else if (menuState == 53) { // Net: Password
+       centerText("= PASSWORD =", 0, 1);
+       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       centerText("Pass: ********", 20, 1);
+       centerText("(View Only)", 35, 1);
+       centerText("[Click to Back]", 50, 1);
+    }
+    else if (menuState == 6) { // Reset
+       centerText("= RESET? =", 0, 1);
+       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       
+       int yNo = 25;
+       int yYes = 40;
+       
+       display.setCursor(20, yNo);
+       if(menuSelection==0) display.print("> NO"); else display.print("  NO");
+       
+       display.setCursor(20, yYes);
+       if(menuSelection==1) display.print("> YES"); else display.print("  YES");
+       maxSelection = 1;
+    }
+    else if (menuState == 7) { // About
+       centerText("= ABOUT =", 0, 1);
+       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       centerText("AQI Monitor v1.1", 20, 1);
+       centerText("Dev: Mega + ESP32", 32, 1);
+       centerText("[Click to Back]", 50, 1);
+    }
+
+    display.display();
+    redraw = false;
+  }
+  
+  checkEncoder();
+}
+
+
+void checkEncoder() {
+  int clkState = digitalRead(ENC_CLK);
+  
+  if (clkState != lastClk && clkState == LOW) { // Falling edge
+    if (digitalRead(ENC_DT) != clkState) { // CW
+      if (menuState == 3) targetPPM += (targetPPM < 10 ? 0.1 : 1.0);
+      else if (menuSelection < maxSelection) menuSelection++;
+    } else { // CCW
+      if (menuState == 3) targetPPM -= (targetPPM < 10 ? 0.1 : 1.0);
+      else if (menuSelection > 0) menuSelection--;
+    }
+    if(targetPPM < 0) targetPPM = 0;
+    redraw = true;
+  }
+  lastClk = clkState;
+
+  if (digitalRead(ENC_SW) == LOW) {
+    if (millis() - lastButtonPress > 300) { // Debounce
+      lastButtonPress = millis();
+      
+      if (menuState == 0) { // Open Menu
+        menuActive = true;
+        menuState = 1;
+        menuSelection = 0;
+      }
+      else if (menuState == 1) { // Main Menu
+        if (menuSelection == 0) { menuState = 2; menuSelection = 0; } // Calib
+        else if (menuSelection == 1) { menuState = 5; menuSelection = 0; } // Net Config
+        else if (menuSelection == 2) { menuState = 6; menuSelection = 0; } // Reset
+        else if (menuSelection == 3) { menuState = 7; } // About
+        else if (menuSelection == 4) { 
+           menuActive = false; 
+           menuState = 0; 
+           display.clearDisplay(); 
+           esp32_fail_count = 0; // Reset watchdog to prevent false trigger
+        } // Exit
+      }
+      else if (menuState == 2) { // Sensor Select
+        if (menuSelection == 7) { menuState = 1; menuSelection = 0; }
+        else {
+           selectedSensorIndex = menuSelection;
+           menuState = 3; 
+           // Default values for ease
+           switch(selectedSensorIndex) {
+             case 0: targetPPM = 10.0; break; 
+             case 1: targetPPM = 400.0; break;
+             default: targetPPM = 0.0; break;
+           }
+        }
+      }
+      else if (menuState == 3) { performCalibration(); }
+      else if (menuState == 5) { // Net Config
+         if (menuSelection == 0) menuState = 51; // Status
+         else if (menuSelection == 1) menuState = 52; // SSID
+         else if (menuSelection == 2) menuState = 53; // Pass
+         else if (menuSelection == 3) { menuState = 1; menuSelection = 1; } // Back
+      }
+      else if (menuState == 51 || menuState == 52 || menuState == 53) {
+         menuState = 5; // Back to Net Menu
+      }
+      else if (menuState == 6) { 
+         if (menuSelection == 1) { calib.initialized = 0; loadCalib(); }
+         menuState = 1; menuSelection = 2;
+      }
+      else if (menuState == 7) { // About Back
+         menuState = 1; menuSelection = 3;
+      }
+      redraw = true;
+    }
+  }
+}
+
+
 void connectJioFi() {
   // Turning on
   display.clearDisplay();
@@ -1147,10 +1465,17 @@ void connectJioFi() {
 void setup() {
   Serial.begin(9600);
   
+  // Rotary Encoder
+  pinMode(ENC_CLK, INPUT);
+  pinMode(ENC_DT, INPUT);
+  pinMode(ENC_SW, INPUT_PULLUP);
+  
   // Power up OLED first
   delay(250); 
   display.begin(i2c_Address, true);
   display.clearDisplay();
+
+  loadCalib(); // Load Sensor Calibration
 
   // Initialize JioFi and wait for network
   connectJioFi();
@@ -1240,6 +1565,13 @@ void setup() {
 }
 
 void loop() {
+  checkEncoder(); // Always check for menu open
+
+  if (menuActive) {
+    handleMenu();
+    return; // BLOCK normal operation
+  }
+
   // Check for messages from ESP32
   checkESP32Messages();
 
