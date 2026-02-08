@@ -109,7 +109,19 @@ bool esp32_ready = false;
 int esp32_fail_count = 0; // Consecutive failure counter for watchdog
 
 // ===== SENSOR DATA STRUCTURE =====
+// Smoothing Variables
+const float ALPHA = 0.2; // Smoothing Factor (Lower = Smoother/Slower)
+float sm_v_co = 0.0;
+float sm_v_co2 = 0.0;
+float sm_v_o3 = 0.0;
+float sm_v_nh3 = 0.0;
+float sm_v_no2 = 0.0;
+float sm_v_so2 = 0.0;
+float sm_v_tvoc = 0.0;
+bool smoothingInitialized = false;
+
 struct SensorData {
+
   float pm1_0; // PM1.0 (µg/m³)
   float pm2_5; // PM2.5 (µg/m³)
   float pm10;  // PM10 (µg/m³)
@@ -504,13 +516,17 @@ bool readPMData() {
 // Read MQ-7 CO sensor (ppm)
 // Using datasheet-accurate parameters
 // Read MQ-7 CO sensor (ppm)
+// Read MQ-7 CO sensor (ppm)
 float readCO() {
   int rawValue = analogRead(MQ7_PIN);
-  float voltage = rawValue * (5.0 / 1023.0);
+  float rawVoltage = rawValue * (5.0 / 1023.0);
+  
+  if (!smoothingInitialized) sm_v_co = rawVoltage;
+  sm_v_co = (ALPHA * rawVoltage) + ((1.0 - ALPHA) * sm_v_co);
+  
+  if (sm_v_co < 0.1) sm_v_co = 0.1;
 
-  if (voltage < 0.1) voltage = 0.1;
-
-  float Rs = ((5.0 * RL_MQ7) / voltage) - RL_MQ7;
+  float Rs = ((5.0 * RL_MQ7) / sm_v_co) - RL_MQ7;
   float ratio = Rs / calib.r0_co;
 
   // MQ-7 datasheet curve: ppm = 10^((log(Rs/R0) - 0.74) / -0.36)
@@ -524,14 +540,21 @@ float readCO() {
 }
 
 
+
 // Read MQ-135 for CO2 (ppm)
 // NOTE: Requires R0 calibration in clean air (400ppm CO2)
 // Read MQ-135 for CO2 (ppm)
+// Read MQ-135 for CO2 (ppm)
 float readCO2() {
   int rawValue = analogRead(MQ135_PIN);
-  float voltage = rawValue * (5.0 / 1023.0);
+  float rawVoltage = rawValue * (5.0 / 1023.0);
+  
+  if (!smoothingInitialized) sm_v_co2 = rawVoltage;
+  sm_v_co2 = (ALPHA * rawVoltage) + ((1.0 - ALPHA) * sm_v_co2);
 
-  float Rs = ((5.0 * RL_MQ135) / voltage) - RL_MQ135;
+  if (sm_v_co2 < 0.1) sm_v_co2 = 0.1;
+
+  float Rs = ((5.0 * RL_MQ135) / sm_v_co2) - RL_MQ135;
   float ratio = Rs / calib.r0_co2;
 
   // MQ135 datasheet: ppm = 116.602 * (ratio ^ -2.769)
@@ -545,15 +568,21 @@ float readCO2() {
 }
 
 
+
 // Read MQ-131 O3 sensor (ppb)
 // Using datasheet curve for low-concentration version
 // Read MQ-131 O3 sensor (ppb)
+// Read MQ-131 O3 sensor (ppb)
 float readO3() {
   int rawValue = analogRead(MQ131_PIN);
-  float voltage = rawValue * (5.0 / 1023.0);
-  if (voltage < 0.1) voltage = 0.1;
+  float rawVoltage = rawValue * (5.0 / 1023.0);
+  
+  if (!smoothingInitialized) sm_v_o3 = rawVoltage;
+  sm_v_o3 = (ALPHA * rawVoltage) + ((1.0 - ALPHA) * sm_v_o3);
+  
+  if (sm_v_o3 < 0.1) sm_v_o3 = 0.1;
 
-  float Rs = ((5.0 * RL_MQ131) / voltage) - RL_MQ131;
+  float Rs = ((5.0 * RL_MQ131) / sm_v_o3) - RL_MQ131;
   float ratio = Rs / calib.r0_o3;
 
   // ppb = 10^((log(Rs/R0) + 0.92) / -0.44)
@@ -567,15 +596,21 @@ float readO3() {
 }
 
 
+
 // Read MQ-137 NH3 sensor (ppm)
 // Using MQ137 datasheet specifications (5-500ppm range)
 // Read MQ-137 NH3 sensor (ppm)
+// Read MQ-137 NH3 sensor (ppm)
 float readNH3() {
   int rawValue = analogRead(MQ137_PIN);
-  float voltage = rawValue * (5.0 / 1023.0);
-  if (voltage < 0.1) voltage = 0.1;
+  float rawVoltage = rawValue * (5.0 / 1023.0);
+  
+  if (!smoothingInitialized) sm_v_nh3 = rawVoltage;
+  sm_v_nh3 = (ALPHA * rawVoltage) + ((1.0 - ALPHA) * sm_v_nh3);
+  
+  if (sm_v_nh3 < 0.1) sm_v_nh3 = 0.1;
 
-  float Rs = ((5.0 * RL_MQ137) / voltage) - RL_MQ137;
+  float Rs = ((5.0 * RL_MQ137) / sm_v_nh3) - RL_MQ137;
   float ratio = Rs / calib.r0_nh3;
 
   // ppm = 50.0 * pow(ratio, -1.2) - calibrated to 50ppm point
@@ -589,16 +624,21 @@ float readNH3() {
 }
 
 
+
 // Read GM-102B MEMS NO2 sensor (ppm)
 // Using datasheet specifications
 // Read GM-102B MEMS NO2 sensor (ppm)
+// Read GM-102B MEMS NO2 sensor (ppm)
 float readNO2() {
   int rawValue = analogRead(NO2_PIN);
-  float voltage = rawValue * (5.0 / 1023.0);
+  float rawVoltage = rawValue * (5.0 / 1023.0);
+  
+  if (!smoothingInitialized) sm_v_no2 = rawVoltage;
+  sm_v_no2 = (ALPHA * rawVoltage) + ((1.0 - ALPHA) * sm_v_no2);
 
   // Baseline voltage from calibration
   float baselineVoltage = calib.r0_no2;
-  float deltaV = voltage - baselineVoltage;
+  float deltaV = sm_v_no2 - baselineVoltage;
   float ppm = deltaV * 2.0; // Sensitivity
 
   // Clamp - don't show negative if below baseline
@@ -608,15 +648,20 @@ float readNO2() {
 }
 
 
+
 // Read MQ-2 for SO2 / Smoke (ppb)
 // NOTE: MQ2 is primarily for LPG/smoke, SO2 sensitivity is limited
 // Requires R0 calibration in clean air
 // Read MQ-2 for SO2 / Smoke (ppb)
+// Read MQ-2 for SO2 / Smoke (ppb)
 float readSO2() {
   int rawValue = analogRead(MQ2_PIN);
-  float voltage = rawValue * (5.0 / 1023.0);
+  float rawVoltage = rawValue * (5.0 / 1023.0);
+  
+  if (!smoothingInitialized) sm_v_so2 = rawVoltage;
+  sm_v_so2 = (ALPHA * rawVoltage) + ((1.0 - ALPHA) * sm_v_so2);
 
-  float Rs = ((5.0 * RL_MQ2) / voltage) - RL_MQ2;
+  float Rs = ((5.0 * RL_MQ2) / sm_v_so2) - RL_MQ2;
   float ratio = Rs / calib.r0_so2;
 
   // MQ2 curve
@@ -629,21 +674,70 @@ float readSO2() {
   return constrain(ppb, 0, 1000);
 }
 
-
 // Read MEMS VOC sensor (GM-502B)
 // Using datasheet specifications
 // Read GM-502B MEMS VOC
+// Read MEMS VOC sensor (GM-502B)
+// Using datasheet specifications
+// Read GM-502B MEMS VOC
+float lastValidTVOC = 0.0;
+
 float readTVOC() {
   int rawValue = analogRead(VOC_PIN);
-  float voltage = rawValue * (5.0 / 1023.0);
+  float rawVoltage = rawValue * (5.0 / 1023.0);
+  
+  // Use much stronger smoothing for TVOC (often noisy)
+  const float ALPHA_TVOC = 0.05; 
+  if (!smoothingInitialized) sm_v_tvoc = rawVoltage;
+  sm_v_tvoc = (ALPHA_TVOC * rawVoltage) + ((1.0 - ALPHA_TVOC) * sm_v_tvoc);
 
   float baselineVoltage = calib.r0_tvoc; // Baseline
-  float deltaV = voltage - baselineVoltage;
+  
+  // Safety: If baseline is too close to max (5.0), the divisor becomes 0 -> Infinity
+  if (baselineVoltage > 4.8) baselineVoltage = 4.8;
+  
+  float deltaV = sm_v_tvoc - baselineVoltage;
+  
+  // If deltaV is very small noise, clamp to 0
+  if (deltaV < 0.05) deltaV = 0.0;
+  
   float ppb = (deltaV / (5.0 - baselineVoltage)) * 1000;
 
   if (ppb < 0) ppb = 0;
-  return constrain(ppb, 0, 2000);
+  ppb = constrain(ppb, 0, 2000);
+  
+  // Outlier Rejection: Don't allow massive jumps in one frame
+  // e.g. 10 -> 600 is likely noise. 
+  // Max change per loop (approx 100ms?) = 50ppb
+  float diff = ppb - lastValidTVOC;
+  if (diff > 50) ppb = lastValidTVOC + 50;
+  else if (diff < -50) ppb = lastValidTVOC - 50;
+  
+  lastValidTVOC = ppb;
+  
+  /* Debugging
+  Serial.print("TVOC RawV:"); Serial.print(rawVoltage);
+  Serial.print(" SmV:"); Serial.print(sm_v_tvoc);
+  Serial.print(" Base:"); Serial.print(baselineVoltage);
+  Serial.print(" PPB:"); Serial.println(ppb);
+  */
+  
+  return ppb;
 }
+
+
+
+void initSmoothing() {
+  sm_v_co = analogRead(MQ7_PIN)*(5.0/1023.0);
+  sm_v_co2 = analogRead(MQ135_PIN)*(5.0/1023.0);
+  sm_v_o3 = analogRead(MQ131_PIN)*(5.0/1023.0);
+  sm_v_nh3 = analogRead(MQ137_PIN)*(5.0/1023.0);
+  sm_v_no2 = analogRead(NO2_PIN)*(5.0/1023.0);
+  sm_v_so2 = analogRead(MQ2_PIN)*(5.0/1023.0);
+  sm_v_tvoc = analogRead(VOC_PIN)*(5.0/1023.0);
+  smoothingInitialized = true;
+}
+
 
 
 // Function to read all sensors and populate sensorData
@@ -1122,8 +1216,11 @@ int maxSelection = 0;
 bool redraw = true;
 int selectedSensorIndex = 0;
 float targetPPM = 0.0;
+bool displayInPPB = false; // Track current display unit
 unsigned long calibStartTime = 0;
 const char* sensorNames[] = {"CO", "CO2", "O3", "NH3", "NO2", "SO2", "TVOC"};
+const bool nativeIsPPB[] = {false, false, true, false, false, true, true}; // true=PPB, false=PPM
+
 
 // Display Helper
 void centerText(String text, int y, int size = 1) {
@@ -1169,30 +1266,42 @@ void performCalibration() {
 
   // Calculate new R0/Baseline
   float newVal = 0;
+  
+  // Convert targetPPM to Native Unit for calculation
+  float calcTarget = targetPPM;
+  bool native = nativeIsPPB[selectedSensorIndex];
+  
+  if (displayInPPB && !native) { 
+     // Displayed in PPB, Native is PPM -> Convert to PPM
+     calcTarget = targetPPM / 1000.0;
+  } else if (!displayInPPB && native) {
+     // Displayed in PPM, Native is PPB -> Convert to PPB
+     calcTarget = targetPPM * 1000.0;
+  }
 
   if (selectedSensorIndex == 0) { // CO (MQ7)
     float rs = ((5.0 * rl) / voltage) - rl;
-    float exponent = -0.36 * log10(targetPPM) + 0.74;
+    float exponent = -0.36 * log10(calcTarget) + 0.74;
     float expectedRatio = pow(10, exponent);
     newVal = rs / expectedRatio;
     calib.r0_co = newVal;
   }
   else if (selectedSensorIndex == 1) { // CO2 (MQ135)
     float rs = ((5.0 * rl) / voltage) - rl;
-    float expectedRatio = pow((targetPPM / 116.602), (1.0 / -2.769));
+    float expectedRatio = pow((calcTarget / 116.602), (1.0 / -2.769));
     newVal = rs / expectedRatio;
     calib.r0_co2 = newVal;
   }
   else if (selectedSensorIndex == 2) { // O3 (MQ131)
      float rs = ((5.0 * rl) / voltage) - rl;
-     float exponent = -0.44 * log10(targetPPM) - 0.92;
+     float exponent = -0.44 * log10(calcTarget) - 0.92;
      float expectedRatio = pow(10, exponent);
      newVal = rs / expectedRatio;
      calib.r0_o3 = newVal;
   }
   else if (selectedSensorIndex == 3) { // NH3 (MQ137)
     float rs = ((5.0 * rl) / voltage) - rl;
-    float expectedRatio = pow((targetPPM/50.0), (1.0/-1.2));
+    float expectedRatio = pow((calcTarget/50.0), (1.0/-1.2));
     newVal = rs / expectedRatio;
     calib.r0_nh3 = newVal;
   }
@@ -1202,7 +1311,7 @@ void performCalibration() {
   }
   else if (selectedSensorIndex == 5) { // SO2 (MQ2)
     float rs = ((5.0 * rl) / voltage) - rl;
-    float expectedRatio = pow((targetPPM/50.0), (1.0/-1.4));
+    float expectedRatio = pow((calcTarget/50.0), (1.0/-1.4));
     newVal = rs / expectedRatio;
     calib.r0_so2 = newVal;
   }
@@ -1217,6 +1326,7 @@ void performCalibration() {
   redraw = true;
 }
 
+
 void handleMenu() {
   if (!menuActive) return;
 
@@ -1225,7 +1335,7 @@ void handleMenu() {
     display.setTextSize(1);
     display.setTextColor(SH110X_WHITE);
 
-    int lineHeight = 13; // 8px font + 5px space
+    int lineHeight = 10; // 8px font + 5px space
     int startY = 12; // Title height + space
 
     if (menuState == 1) { // Main Menu
@@ -1237,7 +1347,7 @@ void handleMenu() {
       maxSelection = totalItems - 1;
 
       // Scrolling Window (Show 4 lines max)
-      int windowSize = 4;
+      int windowSize = 5;
       int startIdx = 0;
       if (menuSelection >= windowSize) startIdx = menuSelection - windowSize + 1;
 
@@ -1258,7 +1368,7 @@ void handleMenu() {
       int totalItems = 8; // 7 Sensors + Back
       maxSelection = totalItems - 1;
       
-      int windowSize = 4;
+      int windowSize = 5;
       int startIdx = 0;
       if (menuSelection >= windowSize) startIdx = menuSelection - windowSize + 1;
 
@@ -1274,25 +1384,84 @@ void handleMenu() {
          }
       }
     }
+    else if (menuState == 21) { // Sensor Options (New State)
+       centerText("= OPTIONS =", 0, 1);
+       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       
+       const char* optItems[] = {"1. Air (Ratio)", "2. Air (Target)", "3. Lab Calib", "4. Unit:", "5. Back"};
+       maxSelection = 4;
+       
+       for(int i=0; i<5; i++) {
+           int y = startY + (i * lineHeight);
+           display.setCursor(0, y);
+           if(i == menuSelection) display.print("> "); else display.print("  ");
+           display.print(optItems[i]);
+           if (i == 3) {
+             display.print(displayInPPB ? " PPB" : " PPM");
+           }
+       }
+    }
+
     else if (menuState == 3) { // Calibration Set PPM
+
       centerText("= SET TARGET =", 0, 1);
       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
       
       display.setCursor(0, 15);
       display.print("Sensor: "); display.println(sensorNames[selectedSensorIndex]);
+
+      // Calculate Current Value
+      float currentVal = 0.0;
+      switch(selectedSensorIndex) {
+        case 0: currentVal = readCO(); break;
+        case 1: currentVal = readCO2(); break;
+        case 2: currentVal = readO3(); break;
+        case 3: currentVal = readNH3(); break;
+        case 4: currentVal = readNO2(); break;
+        case 5: currentVal = readSO2(); break;
+        case 6: currentVal = readTVOC(); break;
+      }
+
+      // Display Current
+      display.setCursor(0, 25);
+      display.print("Curr: "); 
       
-      // Large Value
-      String valStr = String(targetPPM, 1);
-      if(selectedSensorIndex == 2 || selectedSensorIndex == 4 || selectedSensorIndex == 5 || selectedSensorIndex == 6)
-        valStr += " ppb";
-      else 
-        valStr += " ppm";
+      // Convert Current Reading for Display
+      bool native = nativeIsPPB[selectedSensorIndex];
+      float displayVal = currentVal;
+      if (displayInPPB && !native) displayVal *= 1000.0;
+      else if (!displayInPPB && native) displayVal /= 1000.0;
       
-      centerText(valStr, 30, 2);
+      display.print(displayVal, 1);
+      display.println(displayInPPB ? " ppb" : " ppm");
       
-      centerText("[Click to Save]", 55, 1);
+      // Display Target
+      display.setCursor(0, 35);
+      display.print("Tgt:  "); 
+      display.print(targetPPM, 1);
+      display.println(displayInPPB ? " ppb" : " ppm");
+      
+      centerText("[Click for Options]", 55, 1);
       maxSelection = 10000;
     }
+    else if (menuState == 31) { // Confirm Calibration Action
+       centerText("= ACTION =", 0, 1);
+       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       
+       const char* actItems[] = {"1. Save & Exit", "2. Continue Edit", "3. Exit (No Save)"};
+       int totalItems = 3;
+       maxSelection = totalItems - 1;
+       
+       for(int i=0; i<totalItems; i++) {
+         int y = startY + (i * lineHeight);
+         display.setCursor(0, y);
+         if(i == menuSelection) display.print("> "); else display.print("  ");
+         display.print(actItems[i]);
+       }
+    }
+
+
+
 
     else if (menuState == 5) { // Network Config Submenu
       centerText("= NET CONFIG =", 0, 1);
@@ -1363,11 +1532,18 @@ void checkEncoder() {
   int clkState = digitalRead(ENC_CLK);
   
   if (clkState != lastClk && clkState == LOW) { // Falling edge
+    float inc = 1.0;
+    if (menuState == 3) {
+       // Adjust increment based on unit and value magnitude
+       if (displayInPPB) inc = (targetPPM < 100) ? 1.0 : 10.0;
+       else inc = (targetPPM < 10) ? 0.1 : 1.0; 
+    }
+    
     if (digitalRead(ENC_DT) != clkState) { // CW
-      if (menuState == 3) targetPPM += (targetPPM < 10 ? 0.1 : 1.0);
+      if (menuState == 3) targetPPM += inc;
       else if (menuSelection < maxSelection) menuSelection++;
     } else { // CCW
-      if (menuState == 3) targetPPM -= (targetPPM < 10 ? 0.1 : 1.0);
+      if (menuState == 3) targetPPM -= inc;
       else if (menuSelection > 0) menuSelection--;
     }
     if(targetPPM < 0) targetPPM = 0;
@@ -1393,23 +1569,122 @@ void checkEncoder() {
            menuActive = false; 
            menuState = 0; 
            display.clearDisplay(); 
-           esp32_fail_count = 0; // Reset watchdog to prevent false trigger
+           esp32_fail_count = 0;
         } // Exit
       }
       else if (menuState == 2) { // Sensor Select
         if (menuSelection == 7) { menuState = 1; menuSelection = 0; }
         else {
            selectedSensorIndex = menuSelection;
-           menuState = 3; 
-           // Default values for ease
-           switch(selectedSensorIndex) {
-             case 0: targetPPM = 10.0; break; 
-             case 1: targetPPM = 400.0; break;
-             default: targetPPM = 0.0; break;
-           }
+           menuState = 21; // Go to Options
+           menuSelection = 0;
+           
+           // Initialize Default Unit for this sensor
+           displayInPPB = nativeIsPPB[selectedSensorIndex];
         }
       }
-      else if (menuState == 3) { performCalibration(); }
+      else if (menuState == 21) { // Sensor Options
+         if (menuSelection == 0) { // Clean Air Calibration (Ratio Method)
+             display.clearDisplay();
+             centerText("Calibrating...", 25, 1);
+             display.display();
+
+             // Read current voltage
+             float voltage = 0;
+             float rl = 0;
+             switch(selectedSensorIndex) {
+               case 0: voltage = analogRead(MQ7_PIN)*(5.0/1023.0); rl = RL_MQ7; break;
+               case 1: voltage = analogRead(MQ135_PIN)*(5.0/1023.0); rl = RL_MQ135; break;
+               case 2: voltage = analogRead(MQ131_PIN)*(5.0/1023.0); rl = RL_MQ131; break;
+               case 3: voltage = analogRead(MQ137_PIN)*(5.0/1023.0); rl = RL_MQ137; break;
+               case 4: voltage = analogRead(NO2_PIN)*(5.0/1023.0); break;
+               case 5: voltage = analogRead(MQ2_PIN)*(5.0/1023.0); rl = RL_MQ2; break;
+               case 6: voltage = analogRead(VOC_PIN)*(5.0/1023.0); break;
+             }
+             if (voltage < 0.1) voltage = 0.1;
+
+             // Logic for Ratio Method
+             if (selectedSensorIndex == 4 || selectedSensorIndex == 6) {
+                // MEMS (Zero/Baseline) - Set current voltage as baseline
+                if (selectedSensorIndex == 4) calib.r0_no2 = voltage;
+                else calib.r0_tvoc = voltage;
+             } else {
+                // MQ Sensors - Use Fixed Clean Air Ratio (Rs_Air / R0)
+                // R0 = Rs_Air / Ratio
+                float rs = ((5.0 * rl) / voltage) - rl;
+                float ratio = 1.0;
+                
+                if (selectedSensorIndex == 0) ratio = 27.0; // MQ7 (CO) Clean Air Ratio
+                else if (selectedSensorIndex == 1) ratio = 3.6; // MQ135 (CO2) ~400ppm
+                else if (selectedSensorIndex == 2) ratio = 15.0; // MQ131 (O3) Clean Air (Est High R)
+                else if (selectedSensorIndex == 3) ratio = 10.0; // MQ137 (NH3) Clean Air
+                else if (selectedSensorIndex == 5) ratio = 9.8;  // MQ2 (SO2/Smoke) Clean Air
+                
+                float newR0 = rs / ratio;
+                
+                if (selectedSensorIndex == 0) calib.r0_co = newR0;
+                else if (selectedSensorIndex == 1) calib.r0_co2 = newR0;
+                else if (selectedSensorIndex == 2) calib.r0_o3 = newR0;
+                else if (selectedSensorIndex == 3) calib.r0_nh3 = newR0;
+                else if (selectedSensorIndex == 5) calib.r0_so2 = newR0;
+             }
+             
+             saveCalib();
+             delay(1000);
+             
+             // Show Done
+             display.clearDisplay();
+             centerText("Done!", 20, 2);
+             centerText("Ratio Set", 40, 1);
+             display.display();
+             delay(1500);
+             
+             menuState = 2; // Back to list
+             menuSelection = 0;
+         } 
+         else if (menuSelection == 1) { // Clean Air (Target Method)
+             if(selectedSensorIndex == 1) targetPPM = 400.0; // CO2
+             else if (selectedSensorIndex == 2) targetPPM = 20.0; // O3 (ppb) typical
+             else targetPPM = 0.0;
+
+             // Match Display Unit
+             if (displayInPPB && !nativeIsPPB[selectedSensorIndex]) targetPPM *= 1000; 
+             else if (!displayInPPB && nativeIsPPB[selectedSensorIndex]) targetPPM /= 1000;
+             
+             menuState = 3; 
+         }
+         else if (menuSelection == 2) { // Lab Calib (Manual)
+             targetPPM = 0.0;
+             menuState = 3;
+         }
+         else if (menuSelection == 3) { // Unit Toggle
+             displayInPPB = !displayInPPB;
+             redraw = true; 
+         }
+         else if (menuSelection == 4) { // Back
+             menuState = 2; menuSelection = 0;
+         }
+      }
+
+      else if (menuState == 3) { // Go to Confirm Menu
+          menuState = 31; 
+          menuSelection = 0; 
+          redraw = true;
+      }
+      else if (menuState == 31) { // Handle Confirmation
+          if (menuSelection == 0) { // Save & Exit
+              performCalibration(); 
+          }
+          else if (menuSelection == 1) { // Continue Edit
+              menuState = 3; 
+          }
+          else if (menuSelection == 2) { // Exit No Save
+              menuState = 21; // Back to Options
+              menuSelection = 0;
+          }
+      }
+
+
       else if (menuState == 5) { // Net Config
          if (menuSelection == 0) menuState = 51; // Status
          else if (menuSelection == 1) menuState = 52; // SSID
