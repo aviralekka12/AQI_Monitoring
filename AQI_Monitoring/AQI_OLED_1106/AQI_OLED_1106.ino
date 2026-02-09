@@ -49,11 +49,17 @@ struct CalibData {
   float r0_so2;   // MQ2 (or dedicated)
   float r0_no2;   // Fermion NO2 (Baseline Offset or Sensitivity)
   float r0_tvoc;  // MEMS VOC (Baseline)
+  float pm1_offset;  // PM1.0 Offset (server only)
+  float pm10_offset; // PM10 Offset
+  float pm25_offset; // PM2.5 Offset
   uint8_t initialized; // Magic byte (0xA5)
 };
 
-CalibData calib = {
-    10.0, 76.63, 100.0, 50.0, 9.83, 2.5, 0.6, 0}; // Default values
+CalibData calib = { 
+    10.0, 76.63, 100.0, 50.0, 9.83, 2.5, 0.6, 
+    0.0, 0.0, 0.0, // PM Offsets default 0
+    0}; // Default values
+
 
 // ===== ROTARY ENCODER =====
 #define ENC_SW 32
@@ -252,28 +258,10 @@ void printText(String text, int x = 0, int y = 0, int size = 1) {
 
 // ===== EEPROM FUNCTIONS =====
 
-void saveCalib() {
-  EEPROM.put(EEPROM_CALIB_ADDR, calib);
-  Serial.println("Calibration data saved to EEPROM.");
-}
-
-void loadCalib() {
-  CalibData stored;
-  EEPROM.get(EEPROM_CALIB_ADDR, stored);
-  if (stored.initialized == 0xA5) {
-    calib = stored;
-    Serial.println("Calibration loaded.");
-  } else {
-    Serial.println("No calibration found, using defaults.");
-    calib.initialized = 0xA5;
-    saveCalib(); // Save defaults
-  }
-  // Print loaded values for debug
-  Serial.print("R0 CO: "); Serial.println(calib.r0_co);
-  Serial.print("R0 CO2: "); Serial.println(calib.r0_co2);
-}
+// (saveCalib and loadCalib moved to line ~1809)
 
 // Save interval to EEPROM
+
 void saveIntervalToEEPROM(unsigned long interval) {
   EEPROM.put(EEPROM_INTERVAL_ADDR, interval);
   Serial.print("Saved interval to EEPROM: ");
@@ -625,10 +613,10 @@ float readNH3() {
 
 
 
-// Read GM-102B MEMS NO2 sensor (ppm)
+// Read GM-102B MEMS NO2 sensor (ppb)
 // Using datasheet specifications
-// Read GM-102B MEMS NO2 sensor (ppm)
-// Read GM-102B MEMS NO2 sensor (ppm)
+// Read GM-102B MEMS NO2 sensor (ppb)
+// Read GM-102B MEMS NO2 sensor (ppb)
 float readNO2() {
   int rawValue = analogRead(NO2_PIN);
   float rawVoltage = rawValue * (5.0 / 1023.0);
@@ -639,13 +627,14 @@ float readNO2() {
   // Baseline voltage from calibration
   float baselineVoltage = calib.r0_no2;
   float deltaV = sm_v_no2 - baselineVoltage;
-  float ppm = deltaV * 2.0; // Sensitivity
+  float ppb = deltaV * 2.0; // Sensitivity (ppb)
 
   // Clamp - don't show negative if below baseline
-  if (ppm < 0) ppm = 0;
+  if (ppb < 0) ppb = 0;
 
-  return constrain(ppm, 0, 10.0);
+  return constrain(ppb, 0, 10.0);
 }
+
 
 
 
@@ -745,8 +734,16 @@ void readAllSensors() {
   // Read real PM sensor data
   if (readPMData()) {
     sensorData.pm1_0 = pmData.pm1_0;
-    sensorData.pm2_5 = pmData.pm2_5;
-    sensorData.pm10 = pmData.pm10;
+    
+    // Apply calibration offsets
+    float p25 = pmData.pm2_5 + calib.pm25_offset;
+    if(p25 < 0) p25 = 0;
+    sensorData.pm2_5 = p25;
+    
+    float p10 = pmData.pm10 + calib.pm10_offset;
+    if(p10 < 0) p10 = 0;
+    sensorData.pm10 = p10;
+    
     Serial.println("--- PM Sensor Data (ug/m3) ---");
     Serial.print("PM 1.0: ");
     Serial.println(sensorData.pm1_0);
@@ -835,8 +832,11 @@ String buildJsonPayload() {
   // Device Identification
   json += "\"device_id\":\"" + String(sensorData.device_id) + "\",";
 
-  // Air Quality Data
-  json += "\"pm1_0\":" + String(sensorData.pm1_0, 2) + ",";
+  // Air Quality Data (Apply PM1.0 calibration for server only)
+  float pm1_calibrated = sensorData.pm1_0 + calib.pm1_offset;
+  if(pm1_calibrated < 0) pm1_calibrated = 0;
+  
+  json += "\"pm1_0\":" + String(pm1_calibrated, 2) + ",";
   json += "\"pm2_5\":" + String(sensorData.pm2_5, 2) + ",";
   json += "\"pm10\":" + String(sensorData.pm10, 2) + ",";
   json += "\"co\":" + String(sensorData.co, 2) + ",";
@@ -1092,8 +1092,15 @@ void oled_display_update() {
   // Continuously read PM sensor data for real-time display
   if (readPMData()) {
     sensorData.pm1_0 = pmData.pm1_0;
-    sensorData.pm2_5 = pmData.pm2_5;
-    sensorData.pm10 = pmData.pm10;
+    
+    // Apply calibration offsets
+    float p25 = pmData.pm2_5 + calib.pm25_offset;
+    if(p25 < 0) p25 = 0;
+    sensorData.pm2_5 = p25;
+    
+    float p10 = pmData.pm10 + calib.pm10_offset;
+    if(p10 < 0) p10 = 0;
+    sensorData.pm10 = p10;
   }
 
   // Battery icon - show empty battery (or connect voltage sensor to calculate
@@ -1218,8 +1225,10 @@ int selectedSensorIndex = 0;
 float targetPPM = 0.0;
 bool displayInPPB = false; // Track current display unit
 unsigned long calibStartTime = 0;
-const char* sensorNames[] = {"CO", "CO2", "O3", "NH3", "NO2", "SO2", "TVOC"};
-const bool nativeIsPPB[] = {false, false, true, false, false, true, true}; // true=PPB, false=PPM
+const char* sensorNames[] = {"CO", "CO2", "O3", "NH3", "NO2", "SO2", "TVOC", "PM10", "PM2.5", "PM1.0"};
+const bool nativeIsPPB[] = {false, false, true, false, true, true, true, false, false, false}; // true=PPB, false=PPM
+
+
 
 
 // Display Helper
@@ -1319,9 +1328,25 @@ void performCalibration() {
     newVal = voltage; // Baseline
     calib.r0_tvoc = newVal;
   }
+  else if (selectedSensorIndex == 7) { // PM10
+      readPMData(); // Refresh raw readings
+      float raw = pmData.pm10;
+      calib.pm10_offset = calcTarget - raw;
+  }
+  else if (selectedSensorIndex == 8) { // PM2.5
+      readPMData(); // Refresh raw readings
+      float raw = pmData.pm2_5;
+      calib.pm25_offset = calcTarget - raw;
+  }
+  else if (selectedSensorIndex == 9) { // PM1.0
+      readPMData(); // Refresh raw readings
+      float raw = pmData.pm1_0;
+      calib.pm1_offset = calcTarget - raw;
+  }
 
   saveCalib();
   delay(1000);
+
   menuState = 2; // Back to sensor select
   redraw = true;
 }
@@ -1365,7 +1390,7 @@ void handleMenu() {
       centerText("= SENSORS =", 0, 1);
       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
 
-      int totalItems = 8; // 7 Sensors + Back
+      int totalItems = 11; // 10 Sensors + Back
       maxSelection = totalItems - 1;
       
       int windowSize = 5;
@@ -1379,11 +1404,12 @@ void handleMenu() {
             display.setCursor(0, y);
             if(idx == menuSelection) display.print("> "); else display.print("  ");
             
-            if(idx < 7) display.print(sensorNames[idx]);
+            if(idx < 10) display.print(sensorNames[idx]);
             else display.print("Back");
          }
       }
     }
+
     else if (menuState == 21) { // Sensor Options (New State)
        centerText("= OPTIONS =", 0, 1);
        display.drawLine(0, 9, 128, 9, SH110X_WHITE);
@@ -1420,26 +1446,55 @@ void handleMenu() {
         case 4: currentVal = readNO2(); break;
         case 5: currentVal = readSO2(); break;
         case 6: currentVal = readTVOC(); break;
+        case 7: currentVal = sensorData.pm10; break;
+        case 8: currentVal = sensorData.pm2_5; break;
+        case 9: currentVal = sensorData.pm1_0; break;
       }
 
       // Display Current
+
       display.setCursor(0, 25);
       display.print("Curr: "); 
       
       // Convert Current Reading for Display
       bool native = nativeIsPPB[selectedSensorIndex];
       float displayVal = currentVal;
-      if (displayInPPB && !native) displayVal *= 1000.0;
-      else if (!displayInPPB && native) displayVal /= 1000.0;
+      String unitStr = "";
+      
+      // PM sensors always display in ug/m3
+      if (selectedSensorIndex == 7 || selectedSensorIndex == 8) {
+        displayVal = currentVal; // No conversion
+        unitStr = " ug/m3";
+      } else {
+        // Gas sensors - apply unit toggle
+        if (displayInPPB && !native) displayVal *= 1000.0;
+        else if (!displayInPPB && native) displayVal /= 1000.0;
+        unitStr = (displayInPPB ? " ppb" : " ppm");
+      }
       
       display.print(displayVal, 1);
-      display.println(displayInPPB ? " ppb" : " ppm");
+      display.println(unitStr);
+
+      
       
       // Display Target
       display.setCursor(0, 35);
       display.print("Tgt:  "); 
-      display.print(targetPPM, 1);
-      display.println(displayInPPB ? " ppb" : " ppm");
+      
+      float tgtDisplay = targetPPM;
+      String tgtUnitStr = "";
+      
+      if (selectedSensorIndex == 7 || selectedSensorIndex == 8) {
+        tgtDisplay = targetPPM;
+        tgtUnitStr = " ug/m3";
+      } else {
+        tgtDisplay = targetPPM;
+        tgtUnitStr = (displayInPPB ? " ppb" : " ppm");
+      }
+      
+      display.print(tgtDisplay, 1);
+      display.println(tgtUnitStr);
+
       
       centerText("[Click for Options]", 55, 1);
       maxSelection = 10000;
@@ -1573,7 +1628,7 @@ void checkEncoder() {
         } // Exit
       }
       else if (menuState == 2) { // Sensor Select
-        if (menuSelection == 7) { menuState = 1; menuSelection = 0; }
+        if (menuSelection == 10) { menuState = 1; menuSelection = 0; } // Back
         else {
            selectedSensorIndex = menuSelection;
            menuState = 21; // Go to Options
@@ -1583,6 +1638,7 @@ void checkEncoder() {
            displayInPPB = nativeIsPPB[selectedSensorIndex];
         }
       }
+
       else if (menuState == 21) { // Sensor Options
          if (menuSelection == 0) { // Clean Air Calibration (Ratio Method)
              display.clearDisplay();
@@ -1604,11 +1660,29 @@ void checkEncoder() {
              if (voltage < 0.1) voltage = 0.1;
 
              // Logic for Ratio Method
-             if (selectedSensorIndex == 4 || selectedSensorIndex == 6) {
+             if (selectedSensorIndex == 7 || selectedSensorIndex == 8 || selectedSensorIndex == 9) {
+                  // PM Sensors - Offset Calibration (Clean Air = 0)
+                  // CRITICAL: Read RAW PM data directly, not sensorData (which has offset applied)
+                  readPMData(); // Refresh raw PM reading
+                  float raw = 0;
+                  if (selectedSensorIndex == 7) raw = pmData.pm10;
+                  else if (selectedSensorIndex == 8) raw = pmData.pm2_5;
+                  else if (selectedSensorIndex == 9) raw = pmData.pm1_0;
+                  
+                  // Clean Air Target = 0
+                  float newOffset = 0.0 - raw;
+                  
+                  if (selectedSensorIndex == 7) calib.pm10_offset = newOffset;
+                  else if (selectedSensorIndex == 8) calib.pm25_offset = newOffset;
+                  else if (selectedSensorIndex == 9) calib.pm1_offset = newOffset;
+             }
+
+             else if (selectedSensorIndex == 4 || selectedSensorIndex == 6) {
                 // MEMS (Zero/Baseline) - Set current voltage as baseline
                 if (selectedSensorIndex == 4) calib.r0_no2 = voltage;
                 else calib.r0_tvoc = voltage;
              } else {
+
                 // MQ Sensors - Use Fixed Clean Air Ratio (Rs_Air / R0)
                 // R0 = Rs_Air / Ratio
                 float rs = ((5.0 * rl) / voltage) - rl;
@@ -1658,9 +1732,13 @@ void checkEncoder() {
              menuState = 3;
          }
          else if (menuSelection == 3) { // Unit Toggle
-             displayInPPB = !displayInPPB;
+             // Disable for PM sensors (7: PM10, 8: PM2.5, 9: PM1.0)
+             if (selectedSensorIndex < 7) {
+                displayInPPB = !displayInPPB;
+             }
              redraw = true; 
          }
+
          else if (menuSelection == 4) { // Back
              menuState = 2; menuSelection = 0;
          }
@@ -1737,7 +1815,42 @@ void connectJioFi() {
   display.clearDisplay();
 }
 
+// ===== EEPROM CALIBRATION FUNCTIONS =====
+void saveCalib() {
+  calib.initialized = 0xA5; // Mark as valid
+  EEPROM.put(EEPROM_CALIB_ADDR, calib);
+  Serial.println(">>> EEPROM: Calibration Saved.");
+  Serial.print("    R0_CO2: "); Serial.println(calib.r0_co2);
+  Serial.print("    PM25_Off: "); Serial.println(calib.pm25_offset);
+}
+
+void loadCalib() {
+  EEPROM.get(EEPROM_CALIB_ADDR, calib);
+  if (calib.initialized == 0xA5) {
+    Serial.println(">>> EEPROM: Calibration Loaded.");
+    Serial.print("    R0_CO2: "); Serial.println(calib.r0_co2);
+    Serial.print("    PM25_Off: "); Serial.println(calib.pm25_offset);
+  } else {
+    Serial.println(">>> EEPROM: No Valid Data (First Boot). Initializing...");
+    // First boot - restore defaults
+    calib.r0_co = 10.0;
+    calib.r0_co2 = 76.63;
+    calib.r0_o3 = 100.0;
+    calib.r0_nh3 = 50.0;
+    calib.r0_so2 = 9.83;
+    calib.r0_no2 = 2.5;
+    calib.r0_tvoc = 0.6;
+    calib.pm1_offset = 0.0;
+    calib.pm10_offset = 0.0;
+    calib.pm25_offset = 0.0;
+    calib.initialized = 0xA5;
+    saveCalib();
+  }
+}
+
+// ===== SETUP =====
 void setup() {
+
   Serial.begin(9600);
   
   // Rotary Encoder
