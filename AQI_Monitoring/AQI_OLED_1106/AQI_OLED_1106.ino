@@ -159,6 +159,7 @@ int esp32_fail_count = 0; // Consecutive failure counter for watchdog
 int jiofi_fail_count = 0; // Consecutive JioFi/LTE failure counter
 bool jiofi_restarting = false; // Guard flag to prevent nested restarts
 #define JIOFI_MAX_RETRIES 3 // Max JioFi restart attempts before giving up
+bool otaInProgress = false; // Locks OLED to OTA screen during update
 
 // ===== SENSOR DATA STRUCTURE =====
 // Smoothing Variables
@@ -1029,6 +1030,23 @@ void checkESP32Messages() {
       // Clear OLED display
       display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
       display.display();
+      
+      // If OTA was in progress and ESP32 just rebooted, OTA is done!
+      if (otaInProgress) {
+        Serial.println("ESP32 rebooted after OTA - update successful!");
+        display.clearDisplay();
+        printText("OTA Complete!", 15, 20, 1);
+        printText("ESP32 Rebooted OK", 5, 40, 1);
+        display.display();
+        wdtDelay(3000);
+        otaInProgress = false; // Unlock display
+        display.clearDisplay();
+        // Force immediate full display refresh
+        clear_area_update();
+        oled_display_update();
+        drawWiFiIcon();
+        display.display();
+      }
     }
     // Handle SSE commands from server (via ESP32)
     else if (message.startsWith("CMD:")) {
@@ -1176,15 +1194,19 @@ void checkESP32Messages() {
           }
           else if (command == "OTA_CHECK") {
             Serial.println("ESP32 checking for OTA update...");
-            display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
-            printText("Checking Updates...", 5, 28);
+            // Show small down-arrow icon in top bar (next to WiFi icon)
+            display.fillRect(SCREEN_WIDTH - 22, 0, 9, 9, SH110X_BLACK);
+            display.setCursor(SCREEN_WIDTH - 22, 0);
+            display.setTextSize(1);
+            display.print((char)0x19); // Down arrow character
             display.display();
           }
           else if (command == "OTA_START") {
             Serial.println("ESP32 OTA update started!");
+            otaInProgress = true; // Lock display
             display.clearDisplay();
-            printText("OTA Update", 20, 15, 1);
-            printText("Updating ESP32...", 5, 35, 1);
+            printText("OTA Update", 20, 10, 1);
+            printText("Updating ESP32...", 5, 30, 1);
             printText("Do NOT power off!", 5, 50, 1);
             display.display();
           }
@@ -1195,23 +1217,41 @@ void checkESP32Messages() {
             printText("ESP32 Rebooting...", 5, 40, 1);
             display.display();
             wdtDelay(3000);
+            otaInProgress = false; // Unlock display
             display.clearDisplay();
+            // Force immediate full display refresh
+            clear_area_update();
+            oled_display_update();
+            drawWiFiIcon();
+            display.display();
           }
           else if (command == "OTA_FAIL") {
             Serial.println("ESP32 OTA update failed!");
-            display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
-            printText("OTA Update Failed", 5, 28);
+            display.clearDisplay();
+            printText("OTA Update Failed", 5, 25, 1);
+            printText("Resuming normal...", 5, 45, 1);
             display.display();
             wdtDelay(3000);
+            otaInProgress = false; // Unlock display
             display.clearDisplay();
+            // Force immediate full display refresh
+            clear_area_update();
+            oled_display_update();
+            drawWiFiIcon();
+            display.display();
           }
           else if (command == "OTA_UPTODATE") {
             Serial.println("Firmware is up to date.");
-            display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
-            printText("Firmware Up to Date", 3, 28);
+            // Show checkmark icon in top bar briefly, then clear
+            display.fillRect(SCREEN_WIDTH - 22, 0, 9, 9, SH110X_BLACK);
+            display.setCursor(SCREEN_WIDTH - 22, 0);
+            display.setTextSize(1);
+            display.print((char)0xFB); // Checkmark character
             display.display();
-            wdtDelay(2000);
-            display.clearDisplay();
+            // Clear icon after 3 seconds
+            wdtDelay(3000);
+            display.fillRect(SCREEN_WIDTH - 22, 0, 9, 9, SH110X_BLACK);
+            display.display();
           }
         }
       }
@@ -1245,6 +1285,7 @@ void drawWiFiIcon() {
 }
 
 void clear_area_update() {
+  if (otaInProgress) return; // Don't touch display during OTA
   display.fillRect(0, 14, 74, 54, SH110X_BLACK);
   if (page == 1) {
     Serial.println("Page 1");
@@ -1256,6 +1297,7 @@ void clear_area_update() {
 }
 
 void oled_display_update() {
+  if (otaInProgress) return; // Don't touch display during OTA
   // Continuously read PM sensor data for real-time display
   if (readPMData()) {
     sensorData.pm1_0 = pmData.pm1_0;
@@ -2185,19 +2227,24 @@ void loop() {
   // Check for messages from ESP32
   checkESP32Messages();
 
-  // Update WiFi status icon
-  drawWiFiIcon();
-  display.display();
-
-  // Run timer callbacks
-  esp32_status.update();
-
-  if (wifi_status == 1) {
-    oled_display.update();
-    clear_area.update();
+  // Update WiFi status icon (skip during OTA to preserve OTA screen)
+  if (!otaInProgress) {
+    drawWiFiIcon();
+    display.display();
   }
 
-  data_send.update();
+  // Skip all ESP32 communication and display updates during OTA
+  if (!otaInProgress) {
+    // Run timer callbacks
+    esp32_status.update();
+
+    if (wifi_status == 1) {
+      oled_display.update();
+      clear_area.update();
+    }
+
+    data_send.update();
+  }
 }
 
 // Perform hardware reset of ESP32

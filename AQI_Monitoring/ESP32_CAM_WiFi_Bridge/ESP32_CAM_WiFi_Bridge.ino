@@ -20,7 +20,7 @@
 #include <HTTPUpdate.h>   // ESP32 OTA via HTTP
 
 // ===== OTA Configuration =====
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.0.4"
 #define GITHUB_OWNER "aviralekka12"
 #define GITHUB_REPO  "AQI_Monitoring"
 #define OTA_CHECK_INTERVAL 120000UL  // Check every 120 sec (ms)
