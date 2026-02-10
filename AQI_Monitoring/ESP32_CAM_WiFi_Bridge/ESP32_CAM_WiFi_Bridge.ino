@@ -17,6 +17,13 @@
 #include <ArduinoJson.h>  // For parsing SSE commands
 #include <HardwareSerial.h>
 #include <esp_task_wdt.h>  // ESP32 Task Watchdog Timer
+#include <HTTPUpdate.h>   // ESP32 OTA via HTTP
+
+// ===== OTA Configuration =====
+#define FIRMWARE_VERSION "1.0.0"
+#define GITHUB_OWNER "aviralekka12"
+#define GITHUB_REPO  "AQI_Monitoring"
+#define OTA_CHECK_INTERVAL 120000UL  // Check every 120 sec (ms)
 
 // ===== WiFi Configuration =====
 // const char* WIFI_SSID = "AirFiber";      // <-- Change this!
@@ -58,6 +65,9 @@ bool sseConnectedPrinted = false;  // Track if we printed the connection active 
 // ===== Interval Management =====
 long lastSentInterval = -1;  // Track last interval sent to Mega
 
+// ===== OTA Variables =====
+unsigned long lastOTACheck = 0;
+
 // ===== Function Declarations =====
 void connectWiFi();
 bool sendToServer(String jsonPayload, long& extractedInterval);
@@ -65,12 +75,15 @@ void sendStatusToMega(String status);
 void handleMegaMessages();
 void processEvents();
 void handleServerCommand(String jsonCommand);
+void checkForOTAUpdate();
 
 
 void setup() {
   // Debug serial (USB) - uses GPIO1/GPIO3
   Serial.begin(115200);
   Serial.println("\n\n===== ESP32-CAM WiFi Bridge =====");
+  Serial.print("Firmware Version: v");
+  Serial.println(FIRMWARE_VERSION);
   Serial.println("Starting up...");
   
   
@@ -90,6 +103,9 @@ void setup() {
     sendStatusToMega("WIFI_OK");
   }
   sendStatusToMega("READY");
+  
+  // Send firmware version to Mega for display
+  sendStatusToMega("CMD:VERSION:" + String(FIRMWARE_VERSION));
   
   // === ENABLE ESP32 TASK WATCHDOG (30s timeout) ===
   // Longer than Mega's 8s because of network operations (HTTPS, SSE)
@@ -124,6 +140,12 @@ void loop() {
   // Handle Server-Sent Events
   processEvents();
   
+  // Periodic OTA check (every 6 hours)
+  if (wifiConnected && (millis() - lastOTACheck > OTA_CHECK_INTERVAL)) {
+    lastOTACheck = millis();
+    checkForOTAUpdate();
+  }
+
   delay(10);  // Small delay to prevent watchdog issues
 }
 
@@ -457,9 +479,186 @@ void handleServerCommand(String jsonCommand) {
       MegaSerial.println("CMD:RESET");
       Serial.println("-> Mega: CMD:RESET");
     }
+    else if (strcmp(command, "OTA_UPDATE") == 0) {
+      Serial.println("Received OTA_UPDATE command from server");
+      checkForOTAUpdate();
+    }
     else {
       Serial.print("Unknown command: ");
       Serial.println(command);
     }
+  }
+}
+
+// ===== VERSION COMPARISON =====
+// Returns: 1 if v1 > v2, -1 if v1 < v2, 0 if equal
+int compareVersions(const char* v1, const char* v2) {
+  int major1 = 0, minor1 = 0, patch1 = 0;
+  int major2 = 0, minor2 = 0, patch2 = 0;
+  sscanf(v1, "%d.%d.%d", &major1, &minor1, &patch1);
+  sscanf(v2, "%d.%d.%d", &major2, &minor2, &patch2);
+  
+  if (major1 != major2) return (major1 > major2) ? 1 : -1;
+  if (minor1 != minor2) return (minor1 > minor2) ? 1 : -1;
+  if (patch1 != patch2) return (patch1 > patch2) ? 1 : -1;
+  return 0;
+}
+
+// ===== GITHUB OTA UPDATE =====
+void checkForOTAUpdate() {
+  Serial.println("\n===== OTA Update Check =====");
+  Serial.print("Current firmware: v");
+  Serial.println(FIRMWARE_VERSION);
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("OTA: No WiFi, skipping");
+    return;
+  }
+  
+  // Notify Mega
+  sendStatusToMega("CMD:OTA_CHECK");
+  
+  // Step 1: Query GitHub API for latest release
+  WiFiClientSecure apiClient;
+  apiClient.setInsecure(); // Skip cert validation for GitHub API
+  
+  HTTPClient https;
+  String apiUrl = "https://api.github.com/repos/" + String(GITHUB_OWNER) + "/" + String(GITHUB_REPO) + "/releases/latest";
+  
+  Serial.print("Checking: ");
+  Serial.println(apiUrl);
+  
+  if (!https.begin(apiClient, apiUrl)) {
+    Serial.println("OTA: Failed to connect to GitHub API");
+    sendStatusToMega("CMD:OTA_FAIL");
+    return;
+  }
+  
+  https.addHeader("User-Agent", "ESP32-AQI-Monitor");
+  https.setTimeout(15000);
+  
+  esp_task_wdt_reset(); // Feed watchdog before network call
+  int httpCode = https.GET();
+  
+  if (httpCode != 200) {
+    Serial.print("OTA: GitHub API returned: ");
+    Serial.println(httpCode);
+    https.end();
+    sendStatusToMega("CMD:OTA_FAIL");
+    return;
+  }
+  
+  // Step 2: Parse response
+  String response = https.getString();
+  https.end();
+  
+  esp_task_wdt_reset(); // Feed watchdog after download
+  
+  // Parse JSON - need larger doc for GitHub API response
+  DynamicJsonDocument doc(4096);
+  DeserializationError error = deserializeJson(doc, response);
+  
+  if (error) {
+    Serial.print("OTA: JSON parse error: ");
+    Serial.println(error.c_str());
+    sendStatusToMega("CMD:OTA_FAIL");
+    return;
+  }
+  
+  // Extract version from tag_name (e.g., "v1.1.0" -> "1.1.0")
+  const char* tagName = doc["tag_name"];
+  if (!tagName) {
+    Serial.println("OTA: No tag_name in release");
+    sendStatusToMega("CMD:OTA_FAIL");
+    return;
+  }
+  
+  // Strip leading 'v' if present
+  String remoteVersion = String(tagName);
+  if (remoteVersion.startsWith("v") || remoteVersion.startsWith("V")) {
+    remoteVersion = remoteVersion.substring(1);
+  }
+  
+  Serial.print("Latest version: v");
+  Serial.println(remoteVersion);
+  
+  // Step 3: Compare versions
+  if (compareVersions(remoteVersion.c_str(), FIRMWARE_VERSION) <= 0) {
+    Serial.println("OTA: Firmware is up to date!");
+    sendStatusToMega("CMD:OTA_UPTODATE");
+    return;
+  }
+  
+  Serial.println("OTA: New version available!");
+  
+  // Step 4: Find the .bin asset download URL
+  String binUrl = "";
+  JsonArray assets = doc["assets"];
+  for (JsonObject asset : assets) {
+    String name = asset["name"].as<String>();
+    if (name.endsWith(".bin")) {
+      binUrl = asset["browser_download_url"].as<String>();
+      Serial.print("OTA: Found binary: ");
+      Serial.println(name);
+      break;
+    }
+  }
+  
+  if (binUrl.length() == 0) {
+    Serial.println("OTA: No .bin file in release assets");
+    sendStatusToMega("CMD:OTA_FAIL");
+    return;
+  }
+  
+  // Step 5: Download and flash
+  Serial.print("OTA: Downloading from: ");
+  Serial.println(binUrl);
+  sendStatusToMega("CMD:OTA_START");
+  
+  // Disable watchdog during OTA (download can take >30s)
+  esp_task_wdt_delete(NULL);
+  Serial.println("OTA: Watchdog disabled for download");
+  
+  WiFiClientSecure otaClient;
+  otaClient.setInsecure(); // Skip cert for GitHub CDN
+  
+  // Set update callbacks for progress
+  httpUpdate.onStart([]() {
+    Serial.println("OTA: Download started...");
+  });
+  httpUpdate.onEnd([]() {
+    Serial.println("OTA: Download complete!");
+  });
+  httpUpdate.onProgress([](int current, int total) {
+    Serial.printf("OTA: Progress %d/%d bytes (%d%%)\n", current, total, (current * 100) / total);
+  });
+  httpUpdate.onError([](int err) {
+    Serial.printf("OTA: Error[%d]: %s\n", err, httpUpdate.getLastErrorString().c_str());
+  });
+  
+  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  t_httpUpdate_return ret = httpUpdate.update(otaClient, binUrl);
+  
+  switch (ret) {
+    case HTTP_UPDATE_FAILED:
+      Serial.printf("OTA: FAILED (Error %d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+      sendStatusToMega("CMD:OTA_FAIL");
+      // Re-enable watchdog
+      esp_task_wdt_add(NULL);
+      break;
+      
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("OTA: No update needed");
+      sendStatusToMega("CMD:OTA_UPTODATE");
+      // Re-enable watchdog
+      esp_task_wdt_add(NULL);
+      break;
+      
+    case HTTP_UPDATE_OK:
+      Serial.println("OTA: SUCCESS! Rebooting...");
+      sendStatusToMega("CMD:OTA_DONE");
+      delay(1000);
+      ESP.restart(); // Reboot with new firmware
+      break;
   }
 }

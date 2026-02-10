@@ -1140,6 +1140,21 @@ void checkESP32Messages() {
               Serial.println("═══════════════════════════════════");
             }
           }
+          else if (cmdName == "VERSION") {
+            Serial.println("═══════════════════════════════════");
+            Serial.print("📦 ESP32 Firmware: v");
+            Serial.println(cmdValue);
+            Serial.println("═══════════════════════════════════");
+            
+            // Show on OLED briefly
+            display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
+            printText("ESP32 Firmware", 10, 20);
+            String verStr = "v" + cmdValue;
+            printText(verStr.c_str(), 35, 38);
+            display.display();
+            wdtDelay(2000);
+            display.clearDisplay();
+          }
         } else {
           // Command without value
           if (command == "RESET") {
@@ -1158,6 +1173,45 @@ void checkESP32Messages() {
             esp32_ready = false;
             wifi_status = 0;
             Serial.println("Device reset complete");
+          }
+          else if (command == "OTA_CHECK") {
+            Serial.println("ESP32 checking for OTA update...");
+            display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
+            printText("Checking Updates...", 5, 28);
+            display.display();
+          }
+          else if (command == "OTA_START") {
+            Serial.println("ESP32 OTA update started!");
+            display.clearDisplay();
+            printText("OTA Update", 20, 15, 1);
+            printText("Updating ESP32...", 5, 35, 1);
+            printText("Do NOT power off!", 5, 50, 1);
+            display.display();
+          }
+          else if (command == "OTA_DONE") {
+            Serial.println("ESP32 OTA update complete!");
+            display.clearDisplay();
+            printText("OTA Complete!", 15, 20, 1);
+            printText("ESP32 Rebooting...", 5, 40, 1);
+            display.display();
+            wdtDelay(3000);
+            display.clearDisplay();
+          }
+          else if (command == "OTA_FAIL") {
+            Serial.println("ESP32 OTA update failed!");
+            display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
+            printText("OTA Update Failed", 5, 28);
+            display.display();
+            wdtDelay(3000);
+            display.clearDisplay();
+          }
+          else if (command == "OTA_UPTODATE") {
+            Serial.println("Firmware is up to date.");
+            display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
+            printText("Firmware Up to Date", 3, 28);
+            display.display();
+            wdtDelay(2000);
+            display.clearDisplay();
           }
         }
       }
