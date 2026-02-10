@@ -16,6 +16,7 @@
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>  // For parsing SSE commands
 #include <HardwareSerial.h>
+#include <esp_task_wdt.h>  // ESP32 Task Watchdog Timer
 
 // ===== WiFi Configuration =====
 // const char* WIFI_SSID = "AirFiber";      // <-- Change this!
@@ -90,10 +91,18 @@ void setup() {
   }
   sendStatusToMega("READY");
   
+  // === ENABLE ESP32 TASK WATCHDOG (30s timeout) ===
+  // Longer than Mega's 8s because of network operations (HTTPS, SSE)
+  esp_task_wdt_init(30, true);       // 30s timeout, panic (reboot) on trigger
+  esp_task_wdt_add(NULL);            // Subscribe current task (loopTask)
+  Serial.println("ESP32 Watchdog Timer enabled (30s timeout)");
+  
   Serial.println("ESP32-CAM Bridge Ready!");
 }
 
 void loop() {
+  esp_task_wdt_reset(); // Feed the watchdog every loop iteration
+
   // Check WiFi connection periodically
   if (millis() - lastWiFiCheck > WIFI_CHECK_INTERVAL) {
     lastWiFiCheck = millis();

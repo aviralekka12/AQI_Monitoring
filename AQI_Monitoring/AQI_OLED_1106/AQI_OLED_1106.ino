@@ -9,6 +9,18 @@
 #include <NoDelay.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <avr/wdt.h>  // Hardware Watchdog Timer
+
+// ===== WATCHDOG-SAFE DELAY =====
+// Feeds the watchdog in 1-second chunks so long waits don't trigger a reset
+void wdtDelay(unsigned long ms) {
+  while (ms > 0) {
+    unsigned long chunk = min(ms, 1000UL);
+    delay(chunk);
+    wdt_reset();
+    ms -= chunk;
+  }
+}
 
 #define jiofi_switch 46
 
@@ -113,6 +125,9 @@ void hardResetESP32();
 int wifi_status = 0; // 0 = disconnected, 1 = connected
 bool esp32_ready = false;
 int esp32_fail_count = 0; // Consecutive failure counter for watchdog
+int jiofi_fail_count = 0; // Consecutive JioFi/LTE failure counter
+bool jiofi_restarting = false; // Guard flag to prevent nested restarts
+#define JIOFI_MAX_RETRIES 3 // Max JioFi restart attempts before giving up
 
 // ===== SENSOR DATA STRUCTURE =====
 // Smoothing Variables
@@ -899,6 +914,7 @@ bool sendDataToESP32() {
       break;
     }
     delay(50);
+    wdt_reset(); // Feed watchdog during wait
   }
 
   // Clear data icon
@@ -931,10 +947,39 @@ void checkESP32Messages() {
     if (message == "WIFI_OK") {
       wifi_status = 1;
       esp32_ready = true;
+      jiofi_fail_count = 0; // Reset failure counter on success
       Serial.println("WiFi connected!");
     } else if (message == "WIFI_FAIL") {
       wifi_status = 0;
       Serial.println("WiFi disconnected!");
+      
+      // Skip restart if already in a restart process
+      if (!jiofi_restarting) {
+        // Auto-restart JioFi if not exceeded max retries
+        jiofi_fail_count++;
+        Serial.print("JioFi fail count: ");
+        Serial.print(jiofi_fail_count);
+        Serial.print("/");
+        Serial.println(JIOFI_MAX_RETRIES);
+        
+        if (jiofi_fail_count <= JIOFI_MAX_RETRIES) {
+          Serial.println("Auto-restarting JioFi...");
+          jiofi_restarting = true;
+          connectJioFi();      // Power cycle JioFi
+          hardResetESP32();    // Reset ESP32 to reconnect WiFi
+          jiofi_restarting = false;
+        } else {
+          Serial.println("Max JioFi retries reached. Running in offline mode.");
+          display.clearDisplay();
+          printText("JioFi Failed", 0, 20);
+          printText("Offline Mode", 0, 35);
+          display.display();
+          wdtDelay(3000);
+          display.clearDisplay();
+        }
+      } else {
+        Serial.println("(Restart already in progress, skipping)");
+      }
     } else if (message == "READY") {
       esp32_ready = true;
       Serial.println("ESP32 is ready!");
@@ -957,17 +1002,43 @@ void checkESP32Messages() {
         printText("LTE Status:", 0, 20);
         printText("Attached", 0, 32, 1);
         display.display();
-        delay(3000); // Show status for 3 seconds
+        wdtDelay(3000); // Watchdog-safe
         display.clearDisplay();
       } else if (message == "CMD:LTE_FAIL") {
         Serial.println("❌ LTE Status: Not Attached");
-        display.clearDisplay();
-        printText("WiFi Connected", 0, 0);
-        printText("LTE Status:", 0, 20);
-        printText("Not Attached", 0, 32); // Font size 1 to fit
-        display.display();
-        delay(3000); // Show status for 3 seconds
-        display.clearDisplay();
+        
+        // Skip restart if already in a restart process
+        if (!jiofi_restarting) {
+          display.clearDisplay();
+          printText("LTE Not Attached", 0, 0);
+          printText("Restarting JioFi...", 0, 20);
+          display.display();
+          wdtDelay(2000);
+          
+          // Auto-restart JioFi on LTE failure
+          jiofi_fail_count++;
+          Serial.print("JioFi/LTE fail count: ");
+          Serial.print(jiofi_fail_count);
+          Serial.print("/");
+          Serial.println(JIOFI_MAX_RETRIES);
+          
+          if (jiofi_fail_count <= JIOFI_MAX_RETRIES) {
+            jiofi_restarting = true;
+            connectJioFi();      // Power cycle JioFi
+            hardResetESP32();    // Reset ESP32 to reconnect WiFi
+            jiofi_restarting = false;
+          } else {
+            Serial.println("Max JioFi/LTE retries reached. Continuing...");
+            display.clearDisplay();
+            printText("LTE Failed", 0, 20);
+            printText("Max Retries Hit", 0, 35);
+            display.display();
+            wdtDelay(3000);
+            display.clearDisplay();
+          }
+        } else {
+          Serial.println("(LTE restart already in progress, skipping)");
+        }
       }
 
       else if (firstColon > 0) {
@@ -1354,6 +1425,7 @@ void performCalibration() {
 
 void handleMenu() {
   if (!menuActive) return;
+  wdt_reset(); // Feed watchdog while menu is active (loop() is blocked)
 
   if (redraw) {
     display.clearDisplay();
@@ -1793,7 +1865,7 @@ void connectJioFi() {
   
   pinMode(jiofi_switch, OUTPUT);
   digitalWrite(jiofi_switch, LOW);
-  delay(5000);
+  wdtDelay(5000);  // Watchdog-safe
   digitalWrite(jiofi_switch, HIGH);
   
   // Waiting for network
@@ -1804,6 +1876,7 @@ void connectJioFi() {
   // 25 seconds wait for network connection
   for(int i=0; i<25; i++) {
      delay(1000);
+     wdt_reset();  // Feed watchdog each second
      Serial.print(".");
   }
   Serial.println();
@@ -1811,7 +1884,7 @@ void connectJioFi() {
   display.clearDisplay();
   printText("JioFi Connected", 0, 20, 1);
   Serial.println("JioFi Connected");
-  delay(2000);
+  wdtDelay(2000);
   display.clearDisplay();
 }
 
@@ -1950,9 +2023,16 @@ void setup() {
   printText("System Ready!", 0, 0);
   delay(1500);
   display.clearDisplay();
+
+  // === ENABLE HARDWARE WATCHDOG ===
+  // 8-second timeout: if loop() freezes for >8s, Mega auto-reboots
+  wdt_enable(WDTO_8S);
+  Serial.println("Watchdog Timer enabled (8s timeout)");
 }
 
 void loop() {
+  wdt_reset(); // Feed the watchdog every loop iteration
+
   checkEncoder(); // Always check for menu open
 
   if (menuActive) {
@@ -1980,6 +2060,8 @@ void loop() {
 
 // Perform hardware reset of ESP32
 void hardResetESP32() {
+  wdt_reset(); // Feed watchdog before long operation
+
   // Show reset status on OLED
   display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
   printText("Wifi Not Connected", 10, 22);
@@ -1990,10 +2072,46 @@ void hardResetESP32() {
   digitalWrite(ESP32_RESET_PIN, LOW);  // Hold in reset
   delay(200);                          // Wait 200ms
   digitalWrite(ESP32_RESET_PIN, HIGH); // Release reset
-  // Wait for boot
-  delay(1000);
-  Serial.println("ESP32 Reset Complete");
+
   // Clear status variables
   esp32_ready = false;
   wifi_status = 0;
+
+  // Wait for ESP32 to boot and connect to WiFi (max 30 seconds)
+  display.clearDisplay();
+  printText("Waiting for ESP32", 0, 0);
+  printText("WiFi connection...", 0, 16);
+  Serial.println("Waiting for ESP32 to reconnect...");
+
+  unsigned long startTime = millis();
+  while (!esp32_ready && (millis() - startTime < 30000)) {
+    checkESP32Messages();
+    delay(100);
+    wdt_reset(); // Feed watchdog during wait
+
+    // Show waiting animation
+    static int dots = 0;
+    display.setCursor(0, 32);
+    display.setTextColor(SH110X_WHITE, SH110X_BLACK);
+    for (int i = 0; i < 3; i++) {
+      display.print(i < dots ? "." : " ");
+    }
+    display.display();
+    dots = (dots + 1) % 4;
+  }
+
+  display.clearDisplay();
+
+  if (esp32_ready && wifi_status == 1) {
+    Serial.println("ESP32 reconnected to WiFi!");
+    printText("WiFi: Reconnected!", 0, 20);
+    display.display();
+    wdtDelay(1500);
+  } else {
+    Serial.println("ESP32 Reset Complete - WiFi not yet connected");
+    printText("ESP32 Reset Done", 0, 20);
+    display.display();
+    wdtDelay(1500);
+  }
+  display.clearDisplay();
 }
