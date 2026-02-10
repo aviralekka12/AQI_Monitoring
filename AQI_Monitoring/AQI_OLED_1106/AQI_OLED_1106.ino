@@ -43,7 +43,8 @@ DHT dht(DHT_PIN, DHT_TYPE);
 // ===== CALIBRATION & EEPROM =====
 // EEPROM Address Map
 #define EEPROM_INTERVAL_ADDR 0     // 4 bytes
-#define EEPROM_CALIB_ADDR 10       // Start of calibration data
+#define EEPROM_CALIB_ADDR 10       // Start of calibration data (~45 bytes)
+#define EEPROM_SENSOR_CFG_ADDR 100 // Sensor enable/disable config (12 bytes)
 
 // Measured Load Resistors (RL) in kOhms
 #define RL_MQ7 0.694
@@ -71,6 +72,36 @@ CalibData calib = {
     10.0, 76.63, 100.0, 50.0, 9.83, 2.5, 0.6, 
     0.0, 0.0, 0.0, // PM Offsets default 0
     0}; // Default values
+
+// ===== SENSOR ENABLE/DISABLE =====
+// Index: 0=CO, 1=CO2, 2=O3, 3=NH3, 4=NO2, 5=SO2, 6=TVOC, 7=PM10, 8=PM2.5, 9=PM1.0
+#define NUM_SENSORS 10
+bool sensorEnabled[NUM_SENSORS] = {true, true, true, true, true, true, true, true, true, true};
+
+struct SensorConfig {
+  bool enabled[NUM_SENSORS];
+  uint8_t initialized; // Magic byte (0xB6)
+};
+
+void saveSensorConfig() {
+  SensorConfig cfg;
+  for (int i = 0; i < NUM_SENSORS; i++) cfg.enabled[i] = sensorEnabled[i];
+  cfg.initialized = 0xB6;
+  EEPROM.put(EEPROM_SENSOR_CFG_ADDR, cfg);
+  Serial.println(">>> EEPROM: Sensor config saved.");
+}
+
+void loadSensorConfig() {
+  SensorConfig cfg;
+  EEPROM.get(EEPROM_SENSOR_CFG_ADDR, cfg);
+  if (cfg.initialized == 0xB6) {
+    for (int i = 0; i < NUM_SENSORS; i++) sensorEnabled[i] = cfg.enabled[i];
+    Serial.println(">>> EEPROM: Sensor config loaded.");
+  } else {
+    Serial.println(">>> EEPROM: No sensor config found, all enabled.");
+    for (int i = 0; i < NUM_SENSORS; i++) sensorEnabled[i] = true;
+  }
+}
 
 
 // ===== ROTARY ENCODER =====
@@ -436,12 +467,12 @@ const char *getAQICategory(int aqi) {
 // Calculate overall AQI (max of all sub-indices) and identify dominant
 // pollutant
 void calculateOverallAQI() {
-  int pm25_aqi = calculatePM25_AQI(sensorData.pm2_5);
-  int pm10_aqi = calculatePM10_AQI(sensorData.pm10);
-  int o3_aqi = calculateO3_AQI(sensorData.o3);
-  int co_aqi = calculateCO_AQI(sensorData.co);
-  int no2_aqi = calculateNO2_AQI(sensorData.no2);
-  int so2_aqi = calculateSO2_AQI(sensorData.so2);
+  int pm25_aqi = sensorEnabled[8] ? calculatePM25_AQI(sensorData.pm2_5) : 0;
+  int pm10_aqi = sensorEnabled[7] ? calculatePM10_AQI(sensorData.pm10) : 0;
+  int o3_aqi   = sensorEnabled[2] ? calculateO3_AQI(sensorData.o3) : 0;
+  int co_aqi   = sensorEnabled[0] ? calculateCO_AQI(sensorData.co) : 0;
+  int no2_aqi  = sensorEnabled[4] ? calculateNO2_AQI(sensorData.no2) : 0;
+  int so2_aqi  = sensorEnabled[5] ? calculateSO2_AQI(sensorData.so2) : 0;
 
   // Find maximum AQI
   sensorData.aqi = pm25_aqi;
@@ -746,38 +777,49 @@ void initSmoothing() {
 
 // Function to read all sensors and populate sensorData
 void readAllSensors() {
-  // Read real PM sensor data
-  if (readPMData()) {
-    sensorData.pm1_0 = pmData.pm1_0;
-    
-    // Apply calibration offsets
-    float p25 = pmData.pm2_5 + calib.pm25_offset;
-    if(p25 < 0) p25 = 0;
-    sensorData.pm2_5 = p25;
-    
-    float p10 = pmData.pm10 + calib.pm10_offset;
-    if(p10 < 0) p10 = 0;
-    sensorData.pm10 = p10;
-    
-    Serial.println("--- PM Sensor Data (ug/m3) ---");
-    Serial.print("PM 1.0: ");
-    Serial.println(sensorData.pm1_0);
-    Serial.print("PM 2.5: ");
-    Serial.println(sensorData.pm2_5);
-    Serial.print("PM 10:  ");
-    Serial.println(sensorData.pm10);
+  // Read real PM sensor data (skip if all PM sensors disabled)
+  if (sensorEnabled[7] || sensorEnabled[8] || sensorEnabled[9]) {
+    if (readPMData()) {
+      sensorData.pm1_0 = sensorEnabled[9] ? pmData.pm1_0 : 0;
+      
+      // Apply calibration offsets
+      if (sensorEnabled[8]) {
+        float p25 = pmData.pm2_5 + calib.pm25_offset;
+        if(p25 < 0) p25 = 0;
+        sensorData.pm2_5 = p25;
+      } else {
+        sensorData.pm2_5 = 0;
+      }
+      
+      if (sensorEnabled[7]) {
+        float p10 = pmData.pm10 + calib.pm10_offset;
+        if(p10 < 0) p10 = 0;
+        sensorData.pm10 = p10;
+      } else {
+        sensorData.pm10 = 0;
+      }
+      
+      Serial.println("--- PM Sensor Data (ug/m3) ---");
+      Serial.print("PM 1.0: "); Serial.println(sensorData.pm1_0);
+      Serial.print("PM 2.5: "); Serial.println(sensorData.pm2_5);
+      Serial.print("PM 10:  "); Serial.println(sensorData.pm10);
+    } else {
+      Serial.println("PM Sensor: No data available, using last values");
+    }
   } else {
-    Serial.println("PM Sensor: No data available, using last values");
+    sensorData.pm1_0 = 0;
+    sensorData.pm2_5 = 0;
+    sensorData.pm10 = 0;
   }
 
-  // Read gas sensors
-  sensorData.co = readCO();
-  sensorData.co2 = readCO2();
-  sensorData.o3 = readO3();
-  sensorData.nh3 = readNH3();
-  sensorData.no2 = readNO2();
-  sensorData.so2 = readSO2();
-  sensorData.tvoc = readTVOC();
+  // Read gas sensors (skip disabled ones)
+  sensorData.co   = sensorEnabled[0] ? readCO()   : 0;
+  sensorData.co2  = sensorEnabled[1] ? readCO2()  : 0;
+  sensorData.o3   = sensorEnabled[2] ? readO3()   : 0;
+  sensorData.nh3  = sensorEnabled[3] ? readNH3()  : 0;
+  sensorData.no2  = sensorEnabled[4] ? readNO2()  : 0;
+  sensorData.so2  = sensorEnabled[5] ? readSO2()  : 0;
+  sensorData.tvoc = sensorEnabled[6] ? readTVOC() : 0;
 
   // Read DHT22 temperature and humidity
   float h = dht.readHumidity();
@@ -1204,39 +1246,36 @@ void oled_display_update() {
 
   if (page == 1) {
     printText("PM2.5:", 0, 14);
-    printText(String(sensorData.pm2_5), 37, 14);
+    printText(sensorEnabled[8] ? String(sensorData.pm2_5) : "OFF", 37, 14);
 
     printText("PM10 :", 0, 24);
-    printText(String(sensorData.pm10), 37, 24);
+    printText(sensorEnabled[7] ? String(sensorData.pm10) : "OFF", 37, 24);
 
     printText("CO   :", 0, 34);
-    printText(String(readCO()), 37, 34);
+    printText(sensorEnabled[0] ? String(readCO()) : "OFF", 37, 34);
 
     printText("CO2  :", 0, 44);
-    printText(String(readCO2()), 37, 44);
+    printText(sensorEnabled[1] ? String(readCO2()) : "OFF", 37, 44);
 
     printText("O3   :", 0, 54);
-    printText(String(readO3()), 37, 54);
+    printText(sensorEnabled[2] ? String(readO3()) : "OFF", 37, 54);
   }
 
   if (page == 2) {
     printText("NH3  :", 0, 14);
-    printText(String(readNH3()), 37, 14);
+    printText(sensorEnabled[3] ? String(readNH3()) : "OFF", 37, 14);
 
     printText("NO2  :", 0, 24);
-    printText(String(readNO2()), 37, 24);
+    printText(sensorEnabled[4] ? String(readNO2()) : "OFF", 37, 24);
 
     printText("SO2  :", 0, 34);
-    printText(String(readSO2()), 37, 34);
+    printText(sensorEnabled[5] ? String(readSO2()) : "OFF", 37, 34);
 
     printText("TVOC :", 0, 44);
-    printText(String(readTVOC()), 37, 44);
+    printText(sensorEnabled[6] ? String(readTVOC()) : "OFF", 37, 44);
 
     printText("RH   :", 0, 54);
     printText(String(sensorData.humidity), 37, 54);
-
-    // printText("TEMPERATURE:", 0, 74);
-    // printText(String(sensorData.temperature), 37, 74);
   }
 }
 
@@ -1439,11 +1478,11 @@ void handleMenu() {
       centerText("=== MENU ===", 0, 1);
       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
       
-      const char* mainItems[] = {"1. Calibrate", "2. Net Config", "3. Reset", "4. About", "5. Exit"};
-      int totalItems = 5;
+      const char* mainItems[] = {"1. Calibrate", "2. Sensors", "3. Net Config", "4. Reset", "5. About", "6. Exit"};
+      int totalItems = 6;
       maxSelection = totalItems - 1;
 
-      // Scrolling Window (Show 4 lines max)
+      // Scrolling Window (Show 5 lines max)
       int windowSize = 5;
       int startIdx = 0;
       if (menuSelection >= windowSize) startIdx = menuSelection - windowSize + 1;
@@ -1642,9 +1681,43 @@ void handleMenu() {
     else if (menuState == 7) { // About
        centerText("= ABOUT =", 0, 1);
        display.drawLine(0, 9, 128, 9, SH110X_WHITE);
-       centerText("AQI Monitor v1.1", 20, 1);
+       centerText("AQI Monitor v1.2", 20, 1);
        centerText("Dev: Mega + ESP32", 32, 1);
        centerText("[Click to Back]", 50, 1);
+    }
+    else if (menuState == 8) { // Sensor Enable/Disable
+       centerText("= SENSORS =", 0, 1);
+       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       
+       const char* sensorLabels[] = {"CO", "CO2", "O3", "NH3", "NO2", "SO2", "TVOC", "PM10", "PM2.5", "PM1.0", "Back"};
+       int totalItems = 11; // 10 sensors + Back
+       maxSelection = totalItems - 1;
+       
+       // Scrolling window (5 visible items)
+       int windowSize = 5;
+       int startIdx = 0;
+       if (menuSelection >= windowSize) startIdx = menuSelection - windowSize + 1;
+       
+       for(int i = 0; i < windowSize; i++) {
+         int idx = startIdx + i;
+         if (idx < totalItems) {
+           int y = startY + (i * lineHeight);
+           display.setCursor(0, y);
+           if (idx == menuSelection) display.print("> "); else display.print("  ");
+           
+           if (idx < NUM_SENSORS) {
+             // Show sensor name with ON/OFF status
+             display.print(sensorLabels[idx]);
+             // Right-align the status
+             int labelLen = strlen(sensorLabels[idx]);
+             int padding = 10 - labelLen; // Pad to column 10
+             for (int p = 0; p < padding; p++) display.print(" ");
+             display.print(sensorEnabled[idx] ? "[ON]" : "[OFF]");
+           } else {
+             display.print(sensorLabels[idx]); // "Back"
+           }
+         }
+       }
     }
 
     display.display();
@@ -1689,10 +1762,11 @@ void checkEncoder() {
       }
       else if (menuState == 1) { // Main Menu
         if (menuSelection == 0) { menuState = 2; menuSelection = 0; } // Calib
-        else if (menuSelection == 1) { menuState = 5; menuSelection = 0; } // Net Config
-        else if (menuSelection == 2) { menuState = 6; menuSelection = 0; } // Reset
-        else if (menuSelection == 3) { menuState = 7; } // About
-        else if (menuSelection == 4) { 
+        else if (menuSelection == 1) { menuState = 8; menuSelection = 0; } // Sensors
+        else if (menuSelection == 2) { menuState = 5; menuSelection = 0; } // Net Config
+        else if (menuSelection == 3) { menuState = 6; menuSelection = 0; } // Reset
+        else if (menuSelection == 4) { menuState = 7; } // About
+        else if (menuSelection == 5) { 
            menuActive = false; 
            menuState = 0; 
            display.clearDisplay(); 
@@ -1839,17 +1913,30 @@ void checkEncoder() {
          if (menuSelection == 0) menuState = 51; // Status
          else if (menuSelection == 1) menuState = 52; // SSID
          else if (menuSelection == 2) menuState = 53; // Pass
-         else if (menuSelection == 3) { menuState = 1; menuSelection = 1; } // Back
+         else if (menuSelection == 3) { menuState = 1; menuSelection = 2; } // Back to main (Net Config index)
       }
       else if (menuState == 51 || menuState == 52 || menuState == 53) {
          menuState = 5; // Back to Net Menu
       }
       else if (menuState == 6) { 
          if (menuSelection == 1) { calib.initialized = 0; loadCalib(); }
-         menuState = 1; menuSelection = 2;
+         menuState = 1; menuSelection = 3; // Back to main (Reset index)
       }
       else if (menuState == 7) { // About Back
-         menuState = 1; menuSelection = 3;
+         menuState = 1; menuSelection = 4;
+      }
+      else if (menuState == 8) { // Sensor Enable/Disable
+         if (menuSelection < NUM_SENSORS) {
+           // Toggle sensor
+           sensorEnabled[menuSelection] = !sensorEnabled[menuSelection];
+           saveSensorConfig(); // Save to EEPROM
+           Serial.print("Sensor ");
+           Serial.print(menuSelection);
+           Serial.println(sensorEnabled[menuSelection] ? " ENABLED" : " DISABLED");
+         } else {
+           // Back
+           menuState = 1; menuSelection = 1;
+         }
       }
       redraw = true;
     }
@@ -1937,6 +2024,7 @@ void setup() {
   display.clearDisplay();
 
   loadCalib(); // Load Sensor Calibration
+  loadSensorConfig(); // Load Sensor Enable/Disable state
 
   // Initialize JioFi and wait for network
   connectJioFi();
