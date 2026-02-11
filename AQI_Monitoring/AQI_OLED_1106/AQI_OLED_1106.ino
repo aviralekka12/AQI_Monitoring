@@ -28,13 +28,33 @@ void wdtDelay(unsigned long ms) {
 #define DHT_PIN 4
 #define DHT_TYPE DHT22
 
-#define MQ7_PIN A1   // CO sensor
+#define MQ7_PIN A1   // CO sensor (analog reading)
+#define MQ7_HEATER_PIN 44 // PWM pin for MQ-7 heater via IRFZ44N MOSFET
 #define MQ2_PIN A10  // SO2 sensor
 #define MQ131_PIN A8 // O3 sensor
 #define MQ137_PIN A6 // NH3 sensor
 #define NO2_PIN A4   // Fermion MEMS NO2
 #define MQ135_PIN A2 // CO2 sensor
 #define VOC_PIN A0   // DFRobot MEMS VOC
+
+// ===== MQ-7 HEATER CYCLING (Datasheet: 60s@5V + 90s@1.5V) =====
+enum MQ7Phase { MQ7_HEATING, MQ7_SENSING };
+MQ7Phase mq7Phase = MQ7_HEATING;
+unsigned long mq7PhaseStart = 0;
+const unsigned long MQ7_HEAT_DURATION  = 60000;  // 60s cleaning at 5V
+const unsigned long MQ7_SENSE_DURATION = 90000;  // 90s sensing at ~1.5V
+float lastValidCO = 0.0;       // Cached CO reading from last sensing phase
+bool mq7ReadingReady = false;  // True when a valid reading was taken
+const uint8_t MQ7_PWM_HIGH = 255;  // 5.0V (100% duty cycle)
+const uint8_t MQ7_PWM_LOW  = 77;   // ~1.5V (30% duty: 77/255 * 5V ≈ 1.51V)
+
+// ===== AUTO-BASELINE CORRECTION (ABC) for MEMS sensors =====
+unsigned long abcWindowStart = 0;
+const unsigned long ABC_WINDOW = 86400000UL;  // 24 hours in ms
+float abcMinNO2  = 99.0;   // Track min smoothed voltage for NO2 (GM-102B)
+float abcMinTVOC = 99.0;   // Track min smoothed voltage for VOC (GM-502B)
+const float ABC_BLEND = 0.3; // Blend rate: 30% toward new minimum per cycle
+bool abcEnabled = true;      // Can be disabled during calibration
 
 // DHT Sensor object
 // DHT Sensor object
@@ -119,6 +139,7 @@ void esp32_status_update();
 void oled_display_update();
 void data_send_update();
 void clear_area_update();
+void centerText(String text, int y, int size = 1);
 
 int page = 1;
 
@@ -549,20 +570,61 @@ bool readPMData() {
 // ===== GAS SENSOR READING FUNCTIONS =====
 
 // Read MQ-7 CO sensor (ppm)
-// Using datasheet-accurate parameters
-// Read MQ-7 CO sensor (ppm)
-// Read MQ-7 CO sensor (ppm)
+// Only returns live reading during SENSING phase after stabilization; otherwise cached
 float readCO() {
-  int rawValue = analogRead(MQ7_PIN);
-  float rawVoltage = rawValue * (5.0 / 1023.0);
+  // During heating phase, return cached value
+  if (mq7Phase == MQ7_HEATING) {
+    return lastValidCO;
+  }
+
+  // During sensing phase, wait for stabilization (first 30s are unstable)
+  unsigned long senseElapsed = millis() - mq7PhaseStart;
+  if (senseElapsed < 30000) {
+    // Sensor still stabilizing after heater change, return cached
+    return lastValidCO;
+  }
+
+  // Multi-sample with PWM artifact filtering
+  // Module shares heater/sensor ground through MOSFET, so during PWM OFF 
+  // periods the sensor ground floats → reads ~5V (artifact). We filter those out.
+  int validCount = 0;
+  float voltageSum = 0.0;
+  for (int i = 0; i < 20; i++) {
+    int adc = analogRead(MQ7_PIN);
+    float v = adc * (5.0 / 1023.0);
+    if (v < 3.0) {  // Only keep readings during MOSFET ON (real sensor data)
+      voltageSum += v;
+      validCount++;
+    }
+    delayMicroseconds(200);  // Spread across PWM cycle (~2ms per cycle at 490Hz)
+  }
   
-  if (!smoothingInitialized) sm_v_co = rawVoltage;
-  sm_v_co = (ALPHA * rawVoltage) + ((1.0 - ALPHA) * sm_v_co);
+  if (validCount == 0) {
+    Serial.println("MQ7 DEBUG: No valid samples (all floating)");
+    return lastValidCO;  // All readings were artifacts
+  }
+  
+  float rawVoltage = voltageSum / validCount;
+  
+  // Use direct assignment (no smoothing carry-over from heating phase)
+  sm_v_co = rawVoltage;
   
   if (sm_v_co < 0.1) sm_v_co = 0.1;
 
   float Rs = ((5.0 * RL_MQ7) / sm_v_co) - RL_MQ7;
   float ratio = Rs / calib.r0_co;
+
+  // DEBUG: Print filtered values
+  Serial.print("MQ7 DEBUG: valid=");
+  Serial.print(validCount);
+  Serial.print("/20 avgV=");
+  Serial.print(rawVoltage, 3);
+  Serial.print(" Rs=");
+  Serial.print(Rs, 3);
+  Serial.print(" R0=");
+  Serial.print(calib.r0_co, 3);
+  Serial.print(" ratio=");
+  Serial.print(ratio, 4);
 
   // MQ-7 datasheet curve: ppm = 10^((log(Rs/R0) - 0.74) / -0.36)
   float ppm = pow(10, ((log10(ratio) - 0.74) / -0.36));
@@ -571,7 +633,42 @@ float readCO() {
   float humidityCompensation = 1.0 - ((sensorData.humidity - 65.0) * 0.003);
   ppm = ppm * tempCompensation * humidityCompensation;
 
-  return constrain(ppm, 0, 1000);
+  Serial.print(" ppm=");
+  Serial.println(ppm, 2);
+
+  ppm = constrain(ppm, 0, 1000);
+  lastValidCO = ppm;  // Cache for heating phase
+  mq7ReadingReady = true;
+  return ppm;
+}
+
+// MQ-7 Heater Cycling State Machine (non-blocking, call from loop)
+void updateMQ7Heater() {
+  unsigned long now = millis();
+  unsigned long elapsed = now - mq7PhaseStart;
+
+  if (mq7Phase == MQ7_HEATING && elapsed >= MQ7_HEAT_DURATION) {
+    // Switch to sensing phase (1.5V)
+    mq7Phase = MQ7_SENSING;
+    mq7PhaseStart = now;
+    analogWrite(MQ7_HEATER_PIN, MQ7_PWM_LOW);
+    // Reset smoothing - old heating voltage is invalid for sensing
+    sm_v_co = analogRead(MQ7_PIN) * (5.0 / 1023.0);
+    Serial.println("MQ7: Sensing phase (1.5V) - 30s stabilize + 60s reading");
+  }
+  else if (mq7Phase == MQ7_SENSING && elapsed >= MQ7_SENSE_DURATION) {
+    // Take final reading before switching (most stable point)
+    if (sensorEnabled[0]) {
+      readCO(); // Caches in lastValidCO
+    }
+    // Switch to heating phase (5V)
+    mq7Phase = MQ7_HEATING;
+    mq7PhaseStart = now;
+    analogWrite(MQ7_HEATER_PIN, MQ7_PWM_HIGH);
+    Serial.print("MQ7: Heating phase (5V) - CO cached: ");
+    Serial.print(lastValidCO);
+    Serial.println(" ppm");
+  }
 }
 
 
@@ -761,6 +858,64 @@ float readTVOC() {
   return ppb;
 }
 
+// ===== AUTO-BASELINE CORRECTION (ABC) =====
+// Tracks minimum smoothed voltage over 24h window.
+// Assumes sensor sees clean air at least once per window.
+// Only adjusts baseline DOWNWARD (toward cleaner air).
+void updateABC() {
+  if (!abcEnabled) return;
+  if (!smoothingInitialized) return;  // Need valid smoothed values
+  
+  // Track minimum smoothed voltages
+  if (sensorEnabled[4] && sm_v_no2 > 0.05 && sm_v_no2 < abcMinNO2) {
+    abcMinNO2 = sm_v_no2;
+  }
+  if (sensorEnabled[6] && sm_v_tvoc > 0.05 && sm_v_tvoc < abcMinTVOC) {
+    abcMinTVOC = sm_v_tvoc;
+  }
+  
+  // Check if 24h window has elapsed
+  unsigned long now = millis();
+  if (now - abcWindowStart >= ABC_WINDOW) {
+    // === Apply corrections ===
+    bool changed = false;
+    
+    // NO2: Only adjust if minimum is LOWER than current baseline
+    if (abcMinNO2 < 99.0 && abcMinNO2 < calib.r0_no2) {
+      float oldBaseline = calib.r0_no2;
+      calib.r0_no2 = calib.r0_no2 * (1.0 - ABC_BLEND) + abcMinNO2 * ABC_BLEND;
+      Serial.print("ABC NO2: baseline ");
+      Serial.print(oldBaseline, 3);
+      Serial.print(" -> ");
+      Serial.println(calib.r0_no2, 3);
+      changed = true;
+    }
+    
+    // TVOC: Only adjust if minimum is LOWER than current baseline
+    if (abcMinTVOC < 99.0 && abcMinTVOC < calib.r0_tvoc) {
+      float oldBaseline = calib.r0_tvoc;
+      calib.r0_tvoc = calib.r0_tvoc * (1.0 - ABC_BLEND) + abcMinTVOC * ABC_BLEND;
+      Serial.print("ABC TVOC: baseline ");
+      Serial.print(oldBaseline, 3);
+      Serial.print(" -> ");
+      Serial.println(calib.r0_tvoc, 3);
+      changed = true;
+    }
+    
+    // Save to EEPROM if any baseline changed
+    if (changed) {
+      saveCalib();
+      Serial.println("ABC: Baselines saved to EEPROM");
+    } else {
+      Serial.println("ABC: No correction needed this cycle");
+    }
+    
+    // Reset window
+    abcMinNO2 = 99.0;
+    abcMinTVOC = 99.0;
+    abcWindowStart = now;
+  }
+}
 
 
 void initSmoothing() {
@@ -1014,8 +1169,8 @@ void checkESP32Messages() {
         } else {
           Serial.println("Max JioFi retries reached. Running in offline mode.");
           display.clearDisplay();
-          printText("JioFi Failed", 0, 20);
-          printText("Offline Mode", 0, 35);
+          centerText("JioFi Failed", 20);
+          centerText("Offline Mode", 35);
           display.display();
           wdtDelay(3000);
           display.clearDisplay();
@@ -1035,8 +1190,8 @@ void checkESP32Messages() {
       if (otaInProgress) {
         Serial.println("ESP32 rebooted after OTA - update successful!");
         display.clearDisplay();
-        printText("OTA Complete!", 15, 20, 1);
-        printText("ESP32 Rebooted OK", 5, 40, 1);
+        centerText("OTA Complete!", 20);
+        centerText("ESP32 Rebooted OK", 40);
         display.display();
         wdtDelay(3000);
         otaInProgress = false; // Unlock display
@@ -1058,9 +1213,9 @@ void checkESP32Messages() {
       if (message == "CMD:LTE_OK") {
         Serial.println("✅ LTE Status: Attached");
         display.clearDisplay();
-        printText("WiFi Connected", 0, 0);
-        printText("LTE Status:", 0, 20);
-        printText("Attached", 0, 32, 1);
+        centerText("WiFi Connected", 0);
+        centerText("LTE Status:", 20);
+        centerText("Attached", 32);
         display.display();
         wdtDelay(3000); // Watchdog-safe
         display.clearDisplay();
@@ -1070,8 +1225,8 @@ void checkESP32Messages() {
         // Skip restart if already in a restart process
         if (!jiofi_restarting) {
           display.clearDisplay();
-          printText("LTE Not Attached", 0, 0);
-          printText("Restarting JioFi...", 0, 20);
+          centerText("LTE Not Attached", 8);
+          centerText("Restarting JioFi..", 24);
           display.display();
           wdtDelay(2000);
           
@@ -1090,8 +1245,8 @@ void checkESP32Messages() {
           } else {
             Serial.println("Max JioFi/LTE retries reached. Continuing...");
             display.clearDisplay();
-            printText("LTE Failed", 0, 20);
-            printText("Max Retries Hit", 0, 35);
+            centerText("LTE Failed", 20);
+            centerText("Max Retries Hit", 35);
             display.display();
             wdtDelay(3000);
             display.clearDisplay();
@@ -1136,15 +1291,14 @@ void checkESP32Messages() {
 
               // Show feedback on OLED
               display.clearDisplay();
+              centerText("Config Updated!", 0);
               display.setTextSize(1);
               display.setTextColor(SH110X_WHITE, SH110X_BLACK);
-              display.setCursor(0, 0);
-              display.print("Config Updated!");
-              display.setCursor(0, 16);
+              display.setCursor(10, 16);
               display.print("Old: ");
               display.print(oldInterval / 1000);
               display.print("s");
-              display.setCursor(0, 28);
+              display.setCursor(10, 28);
               display.print("New: ");
               display.print(newInterval / 1000);
               display.print("s");
@@ -1166,9 +1320,9 @@ void checkESP32Messages() {
             
             // Show on OLED briefly
             display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
-            printText("ESP32 Firmware", 10, 20);
+            centerText("ESP32 Firmware", 20);
             String verStr = "v" + cmdValue;
-            printText(verStr.c_str(), 35, 38);
+            centerText(verStr, 38);
             display.display();
             wdtDelay(2000);
             display.clearDisplay();
@@ -1180,10 +1334,7 @@ void checkESP32Messages() {
 
             // Show reset message
             display.clearDisplay();
-            display.setTextSize(1);
-            display.setTextColor(SH110X_WHITE, SH110X_BLACK);
-            display.setCursor(0, 20);
-            display.print("Resetting...");
+            centerText("Resetting...", 20);
             display.display();
             delay(1000);
 
@@ -1205,16 +1356,16 @@ void checkESP32Messages() {
             Serial.println("ESP32 OTA update started!");
             otaInProgress = true; // Lock display
             display.clearDisplay();
-            printText("OTA Update", 20, 10, 1);
-            printText("Updating ESP32...", 5, 30, 1);
-            printText("Do NOT power off!", 5, 50, 1);
+            centerText("OTA Update", 10);
+            centerText("Updating ESP32...", 30);
+            centerText("Do NOT power off!", 50);
             display.display();
           }
           else if (command == "OTA_DONE") {
             Serial.println("ESP32 OTA update complete!");
             display.clearDisplay();
-            printText("OTA Complete!", 15, 20, 1);
-            printText("ESP32 Rebooting...", 5, 40, 1);
+            centerText("OTA Complete!", 20);
+            centerText("ESP32 Rebooting...", 40);
             display.display();
             wdtDelay(3000);
             otaInProgress = false; // Unlock display
@@ -1228,8 +1379,8 @@ void checkESP32Messages() {
           else if (command == "OTA_FAIL") {
             Serial.println("ESP32 OTA update failed!");
             display.clearDisplay();
-            printText("OTA Update Failed", 5, 25, 1);
-            printText("Resuming normal...", 5, 45, 1);
+            centerText("OTA Update Failed", 25);
+            centerText("Resuming normal...", 45);
             display.display();
             wdtDelay(3000);
             otaInProgress = false; // Unlock display
@@ -1454,6 +1605,8 @@ void performCalibration() {
   centerText("Calibrating...", 20, 1);
   display.display();
 
+  // Disable ABC during calibration to avoid interference
+  abcEnabled = false;
   long rawSum = 0;
   int samples = 20;
   int pin = 0;
@@ -1470,13 +1623,89 @@ void performCalibration() {
     case 6: pin = VOC_PIN; rl = 0; break;
   }
 
-  // Take Samples
-  for(int i=0; i<samples; i++) {
-    rawSum += analogRead(pin);
-    delay(100);
+  float voltage = 0;
+
+  if (selectedSensorIndex == 0) {
+    // === MQ-7 SPECIAL: Phase-aware calibration with PWM filtering ===
+    
+    // If in heating phase, wait for sensing phase
+    if (mq7Phase == MQ7_HEATING) {
+      unsigned long remaining = MQ7_HEAT_DURATION - (millis() - mq7PhaseStart);
+      display.clearDisplay();
+      centerText("MQ7: Waiting for", 10);
+      centerText("sensing phase...", 22);
+      display.display();
+      
+      // Wait with countdown
+      while (mq7Phase == MQ7_HEATING) {
+        wdt_reset();
+        updateMQ7Heater();  // Keep cycling running
+        unsigned long left = 0;
+        if (millis() - mq7PhaseStart < MQ7_HEAT_DURATION)
+          left = (MQ7_HEAT_DURATION - (millis() - mq7PhaseStart)) / 1000;
+        display.fillRect(0, 36, SCREEN_WIDTH, 16, SH110X_BLACK);
+        centerText(String(left) + "s remaining", 40);
+        display.display();
+        delay(500);
+      }
+    }
+    
+    // Now in sensing phase — wait 30s for stabilization
+    display.clearDisplay();
+    centerText("MQ7: Stabilizing", 10);
+    centerText("30s wait...", 22);
+    display.display();
+    
+    for (int i = 30; i > 0; i--) {
+      wdt_reset();
+      display.fillRect(0, 36, SCREEN_WIDTH, 16, SH110X_BLACK);
+      centerText(String(i) + "s remaining", 40);
+      display.display();
+      delay(1000);
+    }
+    
+    // Take PWM-filtered samples (same logic as readCO)
+    display.clearDisplay();
+    centerText("MQ7: Sampling...", 20);
+    display.display();
+    
+    int validCount = 0;
+    float voltageSum = 0.0;
+    int totalSamples = 100;  // More samples for calibration accuracy
+    for (int i = 0; i < totalSamples; i++) {
+      wdt_reset();
+      int adc = analogRead(MQ7_PIN);
+      float v = adc * (5.0 / 1023.0);
+      if (v < 3.0) {  // Filter PWM-off artifacts
+        voltageSum += v;
+        validCount++;
+      }
+      delayMicroseconds(200);
+    }
+    
+    if (validCount > 0) {
+      voltage = voltageSum / validCount;
+    } else {
+      voltage = 0.01;
+    }
+    
+    Serial.print("MQ7 CALIB: valid=");
+    Serial.print(validCount);
+    Serial.print("/");
+    Serial.print(totalSamples);
+    Serial.print(" avgV=");
+    Serial.println(voltage, 3);
+    
+  } else {
+    // === Standard sampling for all other sensors ===
+    for(int i=0; i<samples; i++) {
+      rawSum += analogRead(pin);
+      delay(100);
+    }
+    float avgRaw = rawSum / (float)samples;
+    voltage = avgRaw * (5.0 / 1023.0);
   }
-  float avgRaw = rawSum / (float)samples;
-  float voltage = avgRaw * (5.0 / 1023.0);
+  
   if(voltage < 0.01) voltage = 0.01;
 
   // Calculate new R0/Baseline
@@ -1500,6 +1729,10 @@ void performCalibration() {
     float expectedRatio = pow(10, exponent);
     newVal = rs / expectedRatio;
     calib.r0_co = newVal;
+    Serial.print("MQ7 CALIB: Rs=");
+    Serial.print(rs, 3);
+    Serial.print(" R0=");
+    Serial.println(newVal, 3);
   }
   else if (selectedSensorIndex == 1) { // CO2 (MQ135)
     float rs = ((5.0 * rl) / voltage) - rl;
@@ -1552,6 +1785,12 @@ void performCalibration() {
 
   saveCalib();
   delay(1000);
+
+  // Re-enable ABC and reset window after calibration
+  abcEnabled = true;
+  abcMinNO2 = 99.0;
+  abcMinTVOC = 99.0;
+  abcWindowStart = millis();
 
   menuState = 2; // Back to sensor select
   redraw = true;
@@ -2043,7 +2282,8 @@ void checkEncoder() {
 void connectJioFi() {
   // Turning on
   display.clearDisplay();
-  printText("Turning on JioFi...", 0, 20, 1);
+  centerText("Turning on JioFi..", 20);
+  display.display();
   Serial.println("Turning on JioFi...");
   
   pinMode(jiofi_switch, OUTPUT);
@@ -2053,7 +2293,8 @@ void connectJioFi() {
   
   // Waiting for network
   display.clearDisplay();
-  printText("Waiting for Network..", 0, 20, 1);
+  centerText("Waiting for Network", 20);
+  display.display();
   Serial.println("Waiting for JioFi Network...");
   
   // 25 seconds wait for network connection
@@ -2065,7 +2306,8 @@ void connectJioFi() {
   Serial.println();
   
   display.clearDisplay();
-  printText("JioFi Connected", 0, 20, 1);
+  centerText("JioFi Connected", 20);
+  display.display();
   Serial.println("JioFi Connected");
   wdtDelay(2000);
   display.clearDisplay();
@@ -2104,6 +2346,30 @@ void loadCalib() {
   }
 }
 
+// ===== PROGRESS BAR HELPER =====
+void drawProgressBar(int x, int y, int width, int height, int progress) {
+  // progress: 0-100
+  if (progress < 0) progress = 0;
+  if (progress > 100) progress = 100;
+  
+  // Draw border
+  display.drawRoundRect(x, y, width, height, 3, SH110X_WHITE);
+  
+  // Fill interior
+  int fillWidth = ((width - 4) * progress) / 100;
+  if (fillWidth > 0) {
+    display.fillRoundRect(x + 2, y + 2, fillWidth, height - 4, 2, SH110X_WHITE);
+  }
+}
+
+// ===== BOOT SCREEN PHASES =====
+void showBootPhase(const char* label, int progress) {
+  display.fillRect(0, 38, SCREEN_WIDTH, 26, SH110X_BLACK); // Clear lower area
+  centerText(label, 40);
+  drawProgressBar(0, 52, SCREEN_WIDTH, 10, progress);
+  display.display();
+}
+
 // ===== SETUP =====
 void setup() {
 
@@ -2119,94 +2385,158 @@ void setup() {
   display.begin(i2c_Address, true);
   display.clearDisplay();
 
-  loadCalib(); // Load Sensor Calibration
-  loadSensorConfig(); // Load Sensor Enable/Disable state
-
-  // Initialize JioFi and wait for network
-  connectJioFi();
-
-  // Load saved interval from EEPROM
+  // ===== BOOT ANIMATION =====
+  // Phase 1: Title reveal
+  display.setTextColor(SH110X_WHITE);
+  centerText("AQI", 5, 2);
+  display.display();
+  delay(400);
+  
+  centerText("Monitoring System", 25);
+  display.display();
+  delay(300);
+  
+  centerText("v2.0 | WiFi", 38);
+  display.display();
+  delay(300);
+  
+  // Decorative line sweep animation
+  for (int i = 0; i < SCREEN_WIDTH; i += 4) {
+    display.drawFastHLine(0, 50, i, SH110X_WHITE);
+    display.display();
+  }
+  delay(500);
+  
+  // ===== SETUP PHASES WITH PROGRESS BAR =====
+  display.clearDisplay();
+  centerText("System Starting Up", 5);
+  display.drawFastHLine(0, 16, SCREEN_WIDTH, SH110X_WHITE);
+  
+  // Phase: Load config from EEPROM
+  showBootPhase("Loading config...", 10);
+  loadCalib();
+  loadSensorConfig();
   currentSendInterval = loadIntervalFromEEPROM();
   data_send.setdelay(currentSendInterval);
-
-  ESP32_SERIAL.begin(ESP32_BAUD);         // Serial2 for ESP32 communication
-  PM_SENSOR_SERIAL.begin(PM_SENSOR_BAUD); // Serial3 for PM sensor
+  showBootPhase("Config loaded!", 20);
+  delay(300);
+  
+  // Phase: JioFi power-on (inline with progress)
+  showBootPhase("Powering JioFi...", 25);
+  pinMode(jiofi_switch, OUTPUT);
+  digitalWrite(jiofi_switch, LOW);
+  for (int i = 0; i < 10; i++) {
+    showBootPhase("Powering JioFi...", 25 + i);
+    delay(500);
+  }
+  digitalWrite(jiofi_switch, HIGH);
+  
+  // Phase: Wait for JioFi network
+  showBootPhase("Waiting network...", 35);
+  for (int i = 0; i < 25; i++) {
+    showBootPhase("Waiting network...", 35 + i);
+    delay(1000);
+    Serial.print(".");
+  }
+  Serial.println();
+  showBootPhase("Network ready!", 60);
+  delay(300);
+  
+  // Phase: Initialize sensors
+  showBootPhase("Init sensors...", 62);
+  ESP32_SERIAL.begin(ESP32_BAUD);
+  PM_SENSOR_SERIAL.begin(PM_SENSOR_BAUD);
   Serial.println("PM Sensor initialized on Serial3");
-
-  // Initialize DHT22 sensor
   dht.begin();
   Serial.println("DHT22 sensor initialized on D4");
-
-  // Configure ESP32 Reset Pin
-  pinMode(ESP32_RESET_PIN, OUTPUT);
-  digitalWrite(ESP32_RESET_PIN, LOW); // Hold ESP32 in reset initially
-  Serial.println("Holding ESP32 in reset...");
-
-  display.clearDisplay(); // clear again just in case
+  showBootPhase("Sensors ready!", 68);
+  delay(300);
   
-  // Initialize device ID
-
-  // Initialize device ID
+  // Phase: ESP32 startup
+  showBootPhase("Starting ESP32...", 70);
+  pinMode(ESP32_RESET_PIN, OUTPUT);
+  digitalWrite(ESP32_RESET_PIN, LOW);
+  Serial.println("Holding ESP32 in reset...");
+  delay(200);
+  
   strcpy(sensorData.device_id, "DEVICE_001");
-
-  // Display welcome message
-  printText("AQI Monitoring System", 2, 20);
-  printText("ESP32 WiFi Version", 10, 35);
-  delay(2000);
-
-  // Enable ESP32 now that Mega is ready
+  
   Serial.println("Releasing ESP32 reset...");
   digitalWrite(ESP32_RESET_PIN, HIGH);
-  display.clearDisplay();
-
-  // === WAIT FOR ESP32 TO CONNECT ===
-  printText("Waiting for ESP32", 0, 0);
-  printText("WiFi connection...", 0, 16);
-
+  
+  // Wait for ESP32 WiFi with animated progress (max 30s, 72->95%)
+  showBootPhase("Connecting WiFi...", 72);
   Serial.println("Waiting for ESP32 to connect to WiFi...");
-
-  // Wait for ESP32 ready signal (max 30 seconds)
+  
   unsigned long startTime = millis();
   while (!esp32_ready && (millis() - startTime < 30000)) {
     checkESP32Messages();
+    int elapsed = millis() - startTime;
+    int progress = 72 + (elapsed * 23) / 30000;
+    showBootPhase("Connecting WiFi...", progress);
     delay(100);
-
-    // Update waiting animation
-    static int dots = 0;
-    display.setCursor(0, 32);
-    display.setTextColor(SH110X_WHITE, SH110X_BLACK);
-    for (int i = 0; i < 3; i++) {
-      display.print(i < dots ? "." : " ");
-    }
-    display.display();
-    dots = (dots + 1) % 4;
   }
-
-  display.clearDisplay();
-
+  
+  // Show connection result
+  display.fillRect(0, 20, SCREEN_WIDTH, 18, SH110X_BLACK);
   if (esp32_ready && wifi_status == 1) {
-    printText("WiFi: Connected!", 0, 0);
+    centerText("WiFi: Connected!", 24);
     Serial.println("ESP32 connected to WiFi!");
-    display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
-    delay(1500);
   } else if (esp32_ready) {
-    printText("ESP32: Ready", 0, 0);
-    printText("WiFi: Connecting...", 0, 16);
-    Serial.println("ESP32 ready, waiting for WiFi...");
-    delay(1500);
+    centerText("WiFi: Connecting...", 24);
+    Serial.println("ESP32 ready, WiFi pending...");
   } else {
-    printText("ESP32: No Response", 0, 0);
-    printText("Resetting...", 0, 16);
-    Serial.println("WARNING: ESP32 not responding! Triggering Reset...");
-    delay(2000);
-    hardResetESP32(); // Try to recover
+    centerText("ESP32: No Response", 24);
+    Serial.println("WARNING: ESP32 not responding!");
+    display.display();
+    delay(1000);
+    hardResetESP32();
   }
-
-  // === INITIALIZATION COMPLETE ===
+  showBootPhase("Almost ready...", 95);
+  delay(500);
+  
+  // ===== SENSOR WARMUP COUNTDOWN =====
   display.clearDisplay();
-  printText("System Ready!", 0, 0);
+  centerText("Sensor Warmup", 0);
+  display.drawFastHLine(0, 10, SCREEN_WIDTH, SH110X_WHITE);
+  centerText("MQ sensors heating", 15);
+  centerText("Please wait...", 27);
+  display.display();
+  
+  int warmupSeconds = 30;
+  for (int i = warmupSeconds; i > 0; i--) {
+    display.fillRect(0, 38, SCREEN_WIDTH, 26, SH110X_BLACK);
+    
+    // Time remaining - center dynamically
+    String timeStr = String(i) + "s remaining";
+    centerText(timeStr, 40);
+    
+    // Progress bar
+    int progress = ((warmupSeconds - i) * 100) / warmupSeconds;
+    drawProgressBar(0, 52, SCREEN_WIDTH, 10, progress);
+    display.display();
+    delay(1000);
+  }
+  
+  // ===== BOOT COMPLETE =====
+  display.clearDisplay();
+  centerText("Ready!", 10, 2);
+  centerText("System Online", 35);
+  drawProgressBar(0, 52, SCREEN_WIDTH, 10, 100);
+  display.display();
   delay(1500);
   display.clearDisplay();
+
+  // Initialize MQ-7 heater cycling (start with heating phase)
+  pinMode(MQ7_HEATER_PIN, OUTPUT);
+  analogWrite(MQ7_HEATER_PIN, MQ7_PWM_HIGH); // Start at 5V
+  mq7PhaseStart = millis();
+  mq7Phase = MQ7_HEATING;
+  Serial.println("MQ7: Heater cycling initialized (60s heat + 90s sense)");
+
+  // Initialize ABC window
+  abcWindowStart = millis();
+  Serial.println("ABC: Auto-baseline correction active (24h window)");
 
   // === ENABLE HARDWARE WATCHDOG ===
   // 8-second timeout: if loop() freezes for >8s, Mega auto-reboots
@@ -2226,6 +2556,12 @@ void loop() {
 
   // Check for messages from ESP32
   checkESP32Messages();
+
+  // MQ-7 heater cycling (non-blocking)
+  updateMQ7Heater();
+
+  // Auto-Baseline Correction for VOC/NO2 (non-blocking)
+  if (!menuActive) updateABC();
 
   // Update WiFi status icon (skip during OTA to preserve OTA screen)
   if (!otaInProgress) {
@@ -2253,8 +2589,8 @@ void hardResetESP32() {
 
   // Show reset status on OLED
   display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
-  printText("Wifi Not Connected", 10, 22);
-  printText("Resetting ESP32...", 10, 32);
+  centerText("WiFi Not Connected", 22);
+  centerText("Resetting ESP32...", 32);
   display.display();
 
   Serial.println("Performing Hard Reset of ESP32...");
@@ -2268,8 +2604,9 @@ void hardResetESP32() {
 
   // Wait for ESP32 to boot and connect to WiFi (max 30 seconds)
   display.clearDisplay();
-  printText("Waiting for ESP32", 0, 0);
-  printText("WiFi connection...", 0, 16);
+  centerText("Waiting for ESP32", 0);
+  centerText("WiFi connection...", 16);
+  display.display();
   Serial.println("Waiting for ESP32 to reconnect...");
 
   unsigned long startTime = millis();
@@ -2293,12 +2630,12 @@ void hardResetESP32() {
 
   if (esp32_ready && wifi_status == 1) {
     Serial.println("ESP32 reconnected to WiFi!");
-    printText("WiFi: Reconnected!", 0, 20);
+    centerText("WiFi: Reconnected!", 20);
     display.display();
     wdtDelay(1500);
   } else {
     Serial.println("ESP32 Reset Complete - WiFi not yet connected");
-    printText("ESP32 Reset Done", 0, 20);
+    centerText("ESP32 Reset Done", 20);
     display.display();
     wdtDelay(1500);
   }
