@@ -1,34 +1,33 @@
 // ===== ESP32-CAM WiFi Bridge for AQI Monitoring System =====
 // Receives sensor data from Arduino Mega via Serial and sends to server via WiFi
-// Uses GPIO13/GPIO14 for UART communication with Mega (ESP32-CAM compatible pins)
+// Uses GPIO1/GPIO3 (USB Serial) for UART communication with Mega
 // 
 // ESP32-CAM Pin Mapping:
-//   GPIO13 (RX) <- Mega TX2 (Pin 16)
-//   GPIO14 (TX) -> Mega RX2 (Pin 17)
+//   GPIO3 (RX) <- Mega TX2 (Pin 16) - WARNING: Lose USB Debugging on PC!
+//   GPIO1 (TX) -> Mega RX2 (Pin 17) - WARNING: Lose USB Debugging on PC!
+//   GPIO14     -> SD Card CLK (Freed up)
 //   
-// NOTE: GPIO12 is a strapping pin - DO NOT USE for TX (causes boot failure)
+// NOTE: SD Card uses 1-bit mode (SD_MMC) to save pins.
+//       Pins used: 14 (CLK), 15 (CMD), 2 (D0)
 //
-// NOTE: ESP32-CAM has limited GPIO pins due to camera/SD card usage
-// GPIO1/GPIO3 are used for USB serial debugging
+// NOTE: GPIO4 (Flash LED) might blink during SD card access.
 
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>  // For parsing SSE commands
-#include <HardwareSerial.h>
 #include <esp_task_wdt.h>  // ESP32 Task Watchdog Timer
 #include <HTTPUpdate.h>   // ESP32 OTA via HTTP
+#include "FS.h"
+#include "SD_MMC.h"
 
 // ===== OTA Configuration =====
-#define FIRMWARE_VERSION "1.0.4"
+#define FIRMWARE_VERSION "1.1.1" // Bumped version
 #define GITHUB_OWNER "aviralekka12"
 #define GITHUB_REPO  "AQI_Monitoring"
 #define OTA_CHECK_INTERVAL 120000UL  // Check every 120 sec (ms)
 
 // ===== WiFi Configuration =====
-// const char* WIFI_SSID = "AirFiber";      // <-- Change this!
-// const char* WIFI_PASSWORD = "6268123511";  // <-- Change this!
-
 const char* WIFI_SSID = "JioFi3";      // <-- Change this!
 const char* WIFI_PASSWORD = "12345678@";  // <-- Change this!
 
@@ -40,19 +39,15 @@ const char* SSE_ENDPOINT = "/sse";
 const char* DEVICE_ID = "DEVICE_001"; // Matching the Mega's ID
 
 // ===== ESP32-CAM Serial Communication =====
-// Using HardwareSerial on GPIO13 (RX) and GPIO12 (TX)
-// These pins are safe to use on ESP32-CAM when not using SD card in 4-bit mode
-HardwareSerial MegaSerial(2);  // Use UART2
-
+// Using Standard Serial (USB) on GPIO3 (RX) and GPIO1 (TX)
 #define MEGA_BAUD 115200
-#define MEGA_RX_PIN 13  // ESP32-CAM RX <- Mega TX2 (Pin 16)
-#define MEGA_TX_PIN 14  // ESP32-CAM TX -> Mega RX2 (Pin 17) - GPIO12 causes boot issues!
-
 
 // ===== Status Variables =====
 bool wifiConnected = false;
 unsigned long lastWiFiCheck = 0;
 const unsigned long WIFI_CHECK_INTERVAL = 10000;  // Check WiFi every 10 seconds
+bool sdCardMounted = false;
+long csvRowCount = 0; // Cached count of rows in data.csv
 
 // ===== SSE Configuration =====
 WiFiClientSecure sseClient;
@@ -76,24 +71,32 @@ void handleMegaMessages();
 void processEvents();
 void handleServerCommand(String jsonCommand);
 void checkForOTAUpdate();
-
+void logToSD(String message);
+void logToCSV(String jsonData);
+void countCSVRows();
+void handleSDCommand(String command);
+void formatSDCard();
+void checkJioFiLTEStatus();
 
 void setup() {
-  // Debug serial (USB) - uses GPIO1/GPIO3
-  Serial.begin(115200);
-  Serial.println("\n\n===== ESP32-CAM WiFi Bridge =====");
-  Serial.print("Firmware Version: v");
-  Serial.println(FIRMWARE_VERSION);
-  Serial.println("Starting up...");
-  
-  
-  // Serial for Mega communication using GPIO13 (RX) and GPIO12 (TX)
-  MegaSerial.begin(MEGA_BAUD, SERIAL_8N1, MEGA_RX_PIN, MEGA_TX_PIN);
-  Serial.println("UART2 initialized for Mega communication");
-  Serial.print("  RX Pin: GPIO");
-  Serial.println(MEGA_RX_PIN);
-  Serial.print("  TX Pin: GPIO");
-  Serial.println(MEGA_TX_PIN);
+  // Initialize Serial for Mega Communication
+  // Note: We use Serial for data now, not debug.
+  Serial.begin(MEGA_BAUD);
+  // Give Mega time to start
+  delay(1000);
+
+  // Initialize SD Card in 1-bit mode
+  // true = 1-bit mode (frees up pins 4, 12, 13)
+  if(!SD_MMC.begin("/sdcard", true)){
+    sdCardMounted = false;
+  } else {
+    sdCardMounted = true;
+    logToSD("===== SYSTEM RESTART =====");
+    logToSD("SD Card Initialized");
+    countCSVRows(); // Count existing rows on startup
+  }
+
+  logToSD("Firmware Version: " + String(FIRMWARE_VERSION));
   
   // Connect to WiFi
   connectWiFi();
@@ -108,12 +111,9 @@ void setup() {
   sendStatusToMega("CMD:VERSION:" + String(FIRMWARE_VERSION));
   
   // === ENABLE ESP32 TASK WATCHDOG (30s timeout) ===
-  // Longer than Mega's 8s because of network operations (HTTPS, SSE)
   esp_task_wdt_init(30, true);       // 30s timeout, panic (reboot) on trigger
   esp_task_wdt_add(NULL);            // Subscribe current task (loopTask)
-  Serial.println("ESP32 Watchdog Timer enabled (30s timeout)");
-  
-  Serial.println("ESP32-CAM Bridge Ready!");
+  logToSD("Watchdog Enabled");
 }
 
 void loop() {
@@ -124,7 +124,7 @@ void loop() {
     lastWiFiCheck = millis();
     
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("WiFi disconnected! Reconnecting...");
+      logToSD("WiFi Disconnected. Reconnecting...");
       wifiConnected = false;
       sendStatusToMega("WIFI_FAIL");
       connectWiFi();
@@ -153,7 +153,7 @@ void loop() {
 // Check JioFi LTE Status (looks for "Attached" on gateway page)
 void checkJioFiLTEStatus() {
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("Checking JioFi LTE Status...");
+    logToSD("Checking JioFi LTE Status...");
     HTTPClient http;
     // JioFi gateway IP
     http.begin("http://192.168.225.1/");
@@ -164,17 +164,15 @@ void checkJioFiLTEStatus() {
     if (httpCode > 0) {
       String payload = http.getString();
       // Search for "Attached" which indicates LTE connection is active
-      // Based on user image, "LTE Status\nConnection Status:\nAttached"
       if (payload.indexOf("Attached") > 0) {
-        Serial.println("LTE Status: Attached");
+        logToSD("LTE Status: Attached");
         sendStatusToMega("CMD:LTE_OK");
       } else {
-        Serial.println("LTE Status: Not Attached");
+        logToSD("LTE Status: Not Attached");
         sendStatusToMega("CMD:LTE_FAIL");
       }
     } else {
-      Serial.print("Error checking LTE status: ");
-      Serial.println(http.errorToString(httpCode));
+      logToSD("Error checking LTE: " + http.errorToString(httpCode));
       sendStatusToMega("CMD:LTE_FAIL"); // Treat connection error as fail
     }
     http.end();
@@ -183,8 +181,7 @@ void checkJioFiLTEStatus() {
 
 // Connect to WiFi with retry logic
 void connectWiFi() {
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(WIFI_SSID);
+  logToSD("Connecting to WiFi: " + String(WIFI_SSID));
   
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -192,27 +189,19 @@ void connectWiFi() {
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 30) {
     delay(500);
-    Serial.print(".");
-
     attempts++;
   }
   
-  
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
-    Serial.println("\nWiFi connected!");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("Signal Strength (RSSI): ");
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
+    logToSD("WiFi Connected. IP: " + WiFi.localIP().toString());
     
     // Check LTE Status immediately after connection
     checkJioFiLTEStatus();
     
   } else {
     wifiConnected = false;
-    Serial.println("\nWiFi connection failed!");
+    logToSD("WiFi Connection Failed");
   }
 }
 
@@ -221,16 +210,11 @@ bool sendToServer(String jsonPayload, long& extractedInterval) {
   extractedInterval = -1; // Default to no interval found
 
   if (!wifiConnected || WiFi.status() != WL_CONNECTED) {
-    Serial.println("No WiFi connection!");
+    logToSD("Send Failed: No WiFi");
     return false;
   }
   
-  
-  Serial.println("\n--- Sending to Server ---");
-  Serial.print("Host: ");
-  Serial.println(SERVER_HOST);
-  Serial.print("Payload size: ");
-  Serial.println(jsonPayload.length());
+  logToSD("Sending Data (" + String(jsonPayload.length()) + " bytes)");
   
   WiFiClientSecure client;
   client.setInsecure();  // Skip certificate validation
@@ -238,24 +222,17 @@ bool sendToServer(String jsonPayload, long& extractedInterval) {
   HTTPClient https;
   
   String url = "https://" + String(SERVER_HOST) + String(API_ENDPOINT);
-  Serial.print("URL: ");
-  Serial.println(url);
   
   if (https.begin(client, url)) {
     https.addHeader("Content-Type", "application/json");
     https.setTimeout(30000);  // 30 second timeout
     
-    Serial.println("Sending POST request...");
     int httpCode = https.POST(jsonPayload);
-    
-    Serial.print("HTTP Response Code: ");
-    Serial.println(httpCode);
     
     if (httpCode > 0) {
       if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
         String response = https.getString();
-        Serial.print("Response: ");
-        Serial.println(response);
+        logToSD("Server Response: " + response);
 
         // Parse response to find send_interval
         StaticJsonDocument<512> doc;
@@ -263,51 +240,41 @@ bool sendToServer(String jsonPayload, long& extractedInterval) {
         if (!error) {
           if (doc.containsKey("send_interval")) {
             long interval = doc["send_interval"];
-            Serial.print("Found new interval in response: ");
-            Serial.println(interval);
             extractedInterval = interval;
+            logToSD("New Interval: " + String(interval));
           }
-        } else {
-           Serial.print("JSON Parse Failed: ");
-           Serial.println(error.c_str());
         }
 
         https.end();
         return true;
       } else {
-        Serial.print("HTTP Error: ");
-        Serial.println(httpCode);
+        logToSD("HTTP Error: " + String(httpCode));
       }
     } else {
-      Serial.print("Connection Error: ");
-      Serial.println(https.errorToString(httpCode));
+      logToSD("Connection Error: " + https.errorToString(httpCode));
     }
     
     https.end();
   } else {
-    Serial.println("Failed to connect to server!");
+    logToSD("Failed to connect to server");
   }
   
   return false;
 }
 
 // Send status message to Mega
+// This is the ONLY function that should write to Serial!
 void sendStatusToMega(String status) {
-  MegaSerial.println(status);
-  Serial.print("-> Mega: ");
   Serial.println(status);
 }
 
 // Handle incoming messages from Mega
 void handleMegaMessages() {
-  if (MegaSerial.available()) {
-    String message = MegaSerial.readStringUntil('\n');
+  if (Serial.available()) {
+    String message = Serial.readStringUntil('\n');
     message.trim();
     
     if (message.length() == 0) return;
-    
-    Serial.print("<- Mega: ");
-    Serial.println(message);
     
     // Check if it's a status request
     if (message == "STATUS") {
@@ -319,11 +286,18 @@ void handleMegaMessages() {
       return;
     }
     
+    // Check if it is a command for the SD card
+    if (message.startsWith("CMD:SD_")) {
+      handleSDCommand(message);
+      return;
+    }
+    
     // Check if it's a JSON payload (starts with '{')
     if (message.startsWith("{")) {
-      Serial.println("Received JSON data from Mega");
-      Serial.print("Payload: ");
-      Serial.println(message);
+      logToSD("Processing JSON Payload");
+      
+      // Also save to CSV
+      logToCSV(message);
       
       long newInterval = -1;
       // Send to server
@@ -331,7 +305,7 @@ void handleMegaMessages() {
       
       if (success) {
         sendStatusToMega("OK");
-        Serial.println("Data sent successfully!");
+        logToSD("Data Sent Successfully");
         
         // If server sent a new interval, check if it's different before forwarding
         if (newInterval > 0) {
@@ -340,21 +314,124 @@ void handleMegaMessages() {
             String cmd = "CMD:SET_INTERVAL:" + String(newInterval);
             sendStatusToMega(cmd);
             lastSentInterval = newInterval; // Update tracking variable
-            Serial.print("Forwarded new interval to Mega: ");
-            Serial.println(newInterval);
-          } else {
-            Serial.print("Interval unchanged (");
-            Serial.print(newInterval);
-            Serial.println("), skipping update");
+            logToSD("Updated Interval: " + String(newInterval));
           }
         }
       } else {
         sendStatusToMega("FAIL");
-        Serial.println("Failed to send data!");
+        logToSD("Data Send Failed");
       }
     }
   }
 }
+
+// ===== SD CARD COMMANDS =====
+void handleSDCommand(String command) {
+  if (command == "CMD:SD_STAT") {
+    if (!sdCardMounted) {
+      sendStatusToMega("CMD:SD_STAT:FAIL");
+      return;
+    }
+    uint64_t totalBytes = SD_MMC.totalBytes();
+    uint64_t usedBytes = SD_MMC.usedBytes();
+    uint64_t freeBytes = totalBytes - usedBytes;
+    float freeMB = (float)freeBytes / (1024.0 * 1024.0);
+    
+    String response = "CMD:SD_STAT:" + String(csvRowCount) + "," + String(freeMB, 2);
+    sendStatusToMega(response);
+  }
+  else if (command.startsWith("CMD:SD_DEL:")) {
+    String filename = command.substring(11);
+    if (!filename.startsWith("/")) filename = "/" + filename;
+    
+    if (SD_MMC.exists(filename)) {
+      SD_MMC.remove(filename);
+      logToSD("Deleted: " + filename);
+      if (filename == "/data.csv") csvRowCount = 0; // Reset count
+      sendStatusToMega("CMD:SD_DEL:OK");
+    } else {
+      sendStatusToMega("CMD:SD_DEL:FAIL");
+    }
+  }
+  else if (command == "CMD:SD_FMT") {
+    formatSDCard();
+  }
+}
+
+void formatSDCard() {
+  // ESP32 SD_MMC library doesn't expose a format() method easily.
+  // We will simulate format by deleting known files.
+  SD_MMC.remove("/log.txt");
+  SD_MMC.remove("/data.csv");
+  // Add other files if needed
+  csvRowCount = 0;
+  logToSD("SD Card Formatted (Simulated)");
+  sendStatusToMega("CMD:SD_FMT:OK");
+}
+
+// ===== CSV LOGGING =====
+void countCSVRows() {
+  if (!sdCardMounted) return;
+  if (!SD_MMC.exists("/data.csv")) {
+    csvRowCount = 0;
+    return;
+  }
+  
+  File file = SD_MMC.open("/data.csv", FILE_READ);
+  if (!file) return;
+  
+  long count = 0;
+  while (file.available()) {
+    char c = file.read();
+    if (c == '\n') count++;
+  }
+  file.close();
+  csvRowCount = count;
+  logToSD("CSV Rows Counted: " + String(csvRowCount));
+}
+
+void logToCSV(String jsonData) {
+  if (!sdCardMounted) return;
+  
+  StaticJsonDocument<512> doc;
+  DeserializationError error = deserializeJson(doc, jsonData);
+  if (error) {
+    logToSD("CSV: JSON Parse Error");
+    return;
+  }
+  
+  File file = SD_MMC.open("/data.csv", FILE_APPEND);
+  if (!file) {
+    logToSD("CSV: File Open Error");
+    return;
+  }
+  
+  // If file is empty, write header
+  if (file.size() == 0) {
+    file.println("Timestamp,AQI,PM2.5,PM10,CO,CO2,O3,NH3,NO2,SO2,TVOC,Temp,Hum,Volt");
+  }
+  
+  // "Timestamp" is just millis() for now since no RTC
+  file.print(millis()); file.print(",");
+  file.print(doc["aqi"].as<int>()); file.print(",");
+  file.print(doc["pm2_5"].as<float>()); file.print(",");
+  file.print(doc["pm10"].as<float>()); file.print(",");
+  file.print(doc["co"].as<float>()); file.print(",");
+  file.print(doc["co2"].as<float>()); file.print(",");
+  file.print(doc["o3"].as<float>()); file.print(",");
+  file.print(doc["nh3"].as<float>()); file.print(",");
+  file.print(doc["no2"].as<float>()); file.print(",");
+  file.print(doc["so2"].as<float>()); file.print(",");
+  file.print(doc["tvoc"].as<float>()); file.print(",");
+  file.print(doc["temperature"].as<float>()); file.print(",");
+  file.print(doc["humidity"].as<float>()); file.print(",");
+  file.print(doc["voltage"].as<float>());
+  file.println();
+  
+  file.close();
+  csvRowCount++;
+}
+
 
 // processEvents: Maintain SSE connection and handle incoming commands
 void processEvents() {
@@ -365,11 +442,11 @@ void processEvents() {
   if (!sseClient.connected()) {
     sseConnectedPrinted = false;  // Reset flag when disconnected
     if (millis() - lastSSERetry > SSE_RETRY_INTERVAL) {
-      Serial.println("SSE: Attempting connection...");
+      logToSD("SSE: Connecting...");
       sseClient.setInsecure(); // Allow self-signed/Cloudflare certs
       
       if (sseClient.connect(SERVER_HOST, SERVER_PORT)) {
-        Serial.println("SSE: Connected!");
+        logToSD("SSE: Connected");
         
         // Construct GET request
         String request = String("GET ") + SSE_ENDPOINT + "?device_id=" + DEVICE_ID + " HTTP/1.1\r\n" +
@@ -384,48 +461,42 @@ void processEvents() {
         lastSSERetry = millis();
         lastSSEStatus = millis();  // Reset status timer on new connection
       } else {
-        Serial.println("SSE: Connection failed");
+        logToSD("SSE: Connection Failed");
         lastSSERetry = millis();
       }
     }
     return;
   }
   
-  // Print "Connection active" once after headers are processed, then every 30 seconds
+  // Heartbeat logging
   if (!sseConnectedPrinted || (millis() - lastSSEStatus > SSE_STATUS_INTERVAL)) {
-    // Only print if we've processed HTTP headers (no more header lines incoming)
     if (!sseClient.available() || sseConnectedPrinted) {
-      Serial.println("✅ SSE: Connection active, listening for commands...");
+      // logToSD("SSE: Active"); // Optional heartbeat log
       lastSSEStatus = millis();
       sseConnectedPrinted = true;
     }
   }
 
-  // 2. Process Incoming Data - silently process headers, only log data lines
+  // 2. Process Incoming Data
   while (sseClient.available()) {
     String line = sseClient.readStringUntil('\n');
     line.trim();
     
     if (line.length() == 0) continue;  // Skip empty lines
     
-    // Skip HTTP headers (they start with HTTP/, or contain ":")
+    // Skip HTTP headers
     if (line.startsWith("HTTP/") || 
         (line.indexOf(':') > 0 && !line.startsWith("data:"))) {
-      // Silently skip headers - don't spam serial
       continue;
     }
 
-    // Parse 'data:' lines - these are actual SSE events
+    // Parse 'data:' lines
     if (line.startsWith("data:")) {
       String payload = line.substring(5); // Remove "data:"
       payload.trim();
       
       if (payload.length() > 0) {
-        Serial.println("🎯 SSE Command Detected!");
-        Serial.print("📄 Payload: ");
-        Serial.println(payload);
-        
-        // Handle command with JSON parsing
+        logToSD("SSE Command: " + payload);
         handleServerCommand(payload);
       }
     }
@@ -434,64 +505,42 @@ void processEvents() {
 
 // handleServerCommand: Parse and execute commands from server
 void handleServerCommand(String jsonCommand) {
-  // Allocate JSON document
   StaticJsonDocument<512> doc;
-  
-  // Deserialize JSON
   DeserializationError error = deserializeJson(doc, jsonCommand);
   
   if (error) {
-    Serial.print("JSON Parse Error: ");
-    Serial.println(error.c_str());
+    logToSD("JSON Parse Error: " + String(error.c_str()));
     return;
   }
   
-  // Extract command details
   const char* type = doc["type"];
   const char* command = doc["command"];
   
-  if (type == nullptr || command == nullptr) {
-    Serial.println("Invalid command format (missing type or command)");
-    return;
-  }
+  if (type == nullptr || command == nullptr) return;
   
-  Serial.print("Command Type: ");
-  Serial.println(type);
-  Serial.print("Command: ");
-  Serial.println(command);
-  
-  // Handle different command types
   if (strcmp(type, "command") == 0) {
     if (strcmp(command, "SET_INTERVAL") == 0) {
       long value = doc["value"];
-      Serial.print("Setting interval to: ");
-      Serial.print(value);
-      Serial.println(" ms");
+      logToSD("Command: SET_INTERVAL " + String(value));
       
-      // Forward to Mega as a formatted command
       String megaCommand = String("CMD:SET_INTERVAL:") + String(value);
-      MegaSerial.println(megaCommand);
-      Serial.print("-> Mega: ");
-      Serial.println(megaCommand);
+      sendStatusToMega(megaCommand);
     } 
     else if (strcmp(command, "RESET") == 0) {
-      Serial.println("Received RESET command");
-      MegaSerial.println("CMD:RESET");
-      Serial.println("-> Mega: CMD:RESET");
+      logToSD("Command: RESET");
+      sendStatusToMega("CMD:RESET");
     }
     else if (strcmp(command, "OTA_UPDATE") == 0) {
-      Serial.println("Received OTA_UPDATE command from server");
+      logToSD("Command: OTA_UPDATE");
       checkForOTAUpdate();
     }
     else {
-      Serial.print("Unknown command: ");
-      Serial.println(command);
+      logToSD("Unknown Command: " + String(command));
     }
   }
 }
 
 // ===== VERSION COMPARISON =====
-// Returns: 1 if v1 > v2, -1 if v1 < v2, 0 if equal
 int compareVersions(const char* v1, const char* v2) {
   int major1 = 0, minor1 = 0, patch1 = 0;
   int major2 = 0, minor2 = 0, patch2 = 0;
@@ -506,30 +555,23 @@ int compareVersions(const char* v1, const char* v2) {
 
 // ===== GITHUB OTA UPDATE =====
 void checkForOTAUpdate() {
-  Serial.println("\n===== OTA Update Check =====");
-  Serial.print("Current firmware: v");
-  Serial.println(FIRMWARE_VERSION);
+  logToSD("Checking for OTA Update...");
   
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("OTA: No WiFi, skipping");
+    logToSD("OTA: Skipped (No WiFi)");
     return;
   }
   
-  // Notify Mega
   sendStatusToMega("CMD:OTA_CHECK");
   
-  // Step 1: Query GitHub API for latest release
   WiFiClientSecure apiClient;
-  apiClient.setInsecure(); // Skip cert validation for GitHub API
+  apiClient.setInsecure(); 
   
   HTTPClient https;
   String apiUrl = "https://api.github.com/repos/" + String(GITHUB_OWNER) + "/" + String(GITHUB_REPO) + "/releases/latest";
   
-  Serial.print("Checking: ");
-  Serial.println(apiUrl);
-  
   if (!https.begin(apiClient, apiUrl)) {
-    Serial.println("OTA: Failed to connect to GitHub API");
+    logToSD("OTA: Failed to connect to GitHub");
     sendStatusToMega("CMD:OTA_FAIL");
     return;
   }
@@ -537,128 +579,113 @@ void checkForOTAUpdate() {
   https.addHeader("User-Agent", "ESP32-AQI-Monitor");
   https.setTimeout(15000);
   
-  esp_task_wdt_reset(); // Feed watchdog before network call
+  esp_task_wdt_reset(); 
   int httpCode = https.GET();
   
   if (httpCode != 200) {
-    Serial.print("OTA: GitHub API returned: ");
-    Serial.println(httpCode);
+    logToSD("OTA: API Error " + String(httpCode));
     https.end();
     sendStatusToMega("CMD:OTA_FAIL");
     return;
   }
   
-  // Step 2: Parse response
   String response = https.getString();
   https.end();
   
-  esp_task_wdt_reset(); // Feed watchdog after download
+  esp_task_wdt_reset(); 
   
-  // Parse JSON - need larger doc for GitHub API response
   DynamicJsonDocument doc(4096);
   DeserializationError error = deserializeJson(doc, response);
   
   if (error) {
-    Serial.print("OTA: JSON parse error: ");
-    Serial.println(error.c_str());
+    logToSD("OTA: JSON Error");
     sendStatusToMega("CMD:OTA_FAIL");
     return;
   }
   
-  // Extract version from tag_name (e.g., "v1.1.0" -> "1.1.0")
   const char* tagName = doc["tag_name"];
   if (!tagName) {
-    Serial.println("OTA: No tag_name in release");
+    logToSD("OTA: No tag name");
     sendStatusToMega("CMD:OTA_FAIL");
     return;
   }
   
-  // Strip leading 'v' if present
   String remoteVersion = String(tagName);
   if (remoteVersion.startsWith("v") || remoteVersion.startsWith("V")) {
     remoteVersion = remoteVersion.substring(1);
   }
   
-  Serial.print("Latest version: v");
-  Serial.println(remoteVersion);
+  logToSD("Remote Version: " + remoteVersion);
   
-  // Step 3: Compare versions
   if (compareVersions(remoteVersion.c_str(), FIRMWARE_VERSION) <= 0) {
-    Serial.println("OTA: Firmware is up to date!");
+    logToSD("OTA: Up to date");
     sendStatusToMega("CMD:OTA_UPTODATE");
     return;
   }
   
-  Serial.println("OTA: New version available!");
+  logToSD("OTA: New update available!");
   
-  // Step 4: Find the .bin asset download URL
   String binUrl = "";
   JsonArray assets = doc["assets"];
   for (JsonObject asset : assets) {
     String name = asset["name"].as<String>();
     if (name.endsWith(".bin")) {
       binUrl = asset["browser_download_url"].as<String>();
-      Serial.print("OTA: Found binary: ");
-      Serial.println(name);
       break;
     }
   }
   
   if (binUrl.length() == 0) {
-    Serial.println("OTA: No .bin file in release assets");
+    logToSD("OTA: No .bin found");
     sendStatusToMega("CMD:OTA_FAIL");
     return;
   }
   
-  // Step 5: Download and flash
-  Serial.print("OTA: Downloading from: ");
-  Serial.println(binUrl);
+  logToSD("OTA: Starting Download...");
   sendStatusToMega("CMD:OTA_START");
   
-  // Disable watchdog during OTA (download can take >30s)
-  esp_task_wdt_delete(NULL);
-  Serial.println("OTA: Watchdog disabled for download");
+  esp_task_wdt_delete(NULL); // Disable watchdog
   
   WiFiClientSecure otaClient;
-  otaClient.setInsecure(); // Skip cert for GitHub CDN
-  
-  // Set update callbacks for progress
-  httpUpdate.onStart([]() {
-    Serial.println("OTA: Download started...");
-  });
-  httpUpdate.onEnd([]() {
-    Serial.println("OTA: Download complete!");
-  });
-  httpUpdate.onProgress([](int current, int total) {
-    Serial.printf("OTA: Progress %d/%d bytes (%d%%)\n", current, total, (current * 100) / total);
-  });
-  httpUpdate.onError([](int err) {
-    Serial.printf("OTA: Error[%d]: %s\n", err, httpUpdate.getLastErrorString().c_str());
-  });
+  otaClient.setInsecure(); 
   
   httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   t_httpUpdate_return ret = httpUpdate.update(otaClient, binUrl);
   
   switch (ret) {
     case HTTP_UPDATE_FAILED:
-      Serial.printf("OTA: FAILED (Error %d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+      logToSD("OTA: FAILED (" + httpUpdate.getLastErrorString() + ")");
       sendStatusToMega("CMD:OTA_FAIL");
-      // Re-enable watchdog
       esp_task_wdt_add(NULL);
       break;
       
     case HTTP_UPDATE_NO_UPDATES:
-      Serial.println("OTA: No update needed");
+      logToSD("OTA: No Updates");
       sendStatusToMega("CMD:OTA_UPTODATE");
-      // Re-enable watchdog
       esp_task_wdt_add(NULL);
       break;
       
     case HTTP_UPDATE_OK:
-      Serial.println("OTA: SUCCESS! Rebooting...");
+      logToSD("OTA: Success! Rebooting...");
       sendStatusToMega("CMD:OTA_DONE");
       delay(1000);
-      ESP.restart(); // Reboot with new firmware
+      ESP.restart(); 
       break;
   }
+}
+
+// ===== SD CARD LOGGING =====
+void logToSD(String message) {
+  if (!sdCardMounted) return;
+  
+  File file = SD_MMC.open("/log.txt", FILE_APPEND);
+  if(!file){
+    return;
+  }
+  // Add timestamp if we had RTC, but just millis for now
+  file.print("[");
+  file.print(millis());
+  file.print("] ");
+  file.println(message);
+  file.close();
 }
