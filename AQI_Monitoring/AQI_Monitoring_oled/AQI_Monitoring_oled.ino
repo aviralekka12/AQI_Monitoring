@@ -2,8 +2,13 @@
 // Arduino Mega 2560 - Sensor Hub & Display
 // Communicates with ESP32 via Serial2 for WiFi connectivity
 
-#include <Adafruit_GFX.h>
-#include <Adafruit_SH110X.h>
+#include <U8g2lib.h>
+#ifdef U8X8_HAVE_HW_SPI
+#include <SPI.h>
+#endif
+#ifdef U8X8_HAVE_HW_I2C
+#include <Wire.h>
+#endif
 #include <DHT.h>
 #include <EEPROM.h>
 #include <NoDelay.h>
@@ -252,91 +257,72 @@ SensorData sensorData;
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 #define OLED_RESET -1    //   QT-PY / XIAO
-Adafruit_SH1106G display =
-    Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// U8g2 Instance
+U8G2_SH1106_128X64_NONAME_F_HW_I2C display(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
 // ===== BITMAP ICONS =====
 
 // 'b_bl', 12x8px
-const unsigned char b_bl[] PROGMEM = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                      0x00, 0x00, 0x00, 0x00};
+const unsigned char b_bl[] PROGMEM = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+0x00, 0x00, 0x00, 0x00};
 
 // 'b0', 12x8px
-const unsigned char b_0[] PROGMEM = {0x00, 0x00, 0xff, 0xe0, 0x80, 0x20,
-                                     0x80, 0x10, 0x80, 0x10, 0x80, 0x20,
-                                     0xff, 0xe0, 0x00, 0x00};
+const unsigned char b_0[] PROGMEM = {0x00, 0x00, 0xff, 0x07, 0x01, 0x04, 0x01, 0x08, 0x01, 0x08, 0x01, 0x04, 
+0xff, 0x07, 0x00, 0x00};
 // 'b1', 12x8px
-const unsigned char b_1[] PROGMEM = {0x00, 0x00, 0xff, 0xe0, 0xc0, 0x20,
-                                     0xc0, 0x10, 0xc0, 0x10, 0xc0, 0x20,
-                                     0xff, 0xe0, 0x00, 0x00};
+const unsigned char b_1[] PROGMEM = {0x00, 0x00, 0xff, 0x07, 0x03, 0x04, 0x03, 0x08, 0x03, 0x08, 0x03, 0x04, 
+0xff, 0x07, 0x00, 0x00};
 // 'b2', 12x8px
-const unsigned char b_2[] PROGMEM = {0x00, 0x00, 0xff, 0xe0, 0xe0, 0x20,
-                                     0xe0, 0x10, 0xe0, 0x10, 0xe0, 0x20,
-                                     0xff, 0xe0, 0x00, 0x00};
+const unsigned char b_2[] PROGMEM = {0x00, 0x00, 0xff, 0x07, 0x07, 0x04, 0x07, 0x08, 0x07, 0x08, 0x07, 0x04, 
+0xff, 0x07, 0x00, 0x00};
 // 'b3', 12x8px
-const unsigned char b_3[] PROGMEM = {0x00, 0x00, 0xff, 0xe0, 0xf0, 0x20,
-                                     0xf0, 0x10, 0xf0, 0x10, 0xf0, 0x20,
-                                     0xff, 0xe0, 0x00, 0x00};
+const unsigned char b_3[] PROGMEM = {0x00, 0x00, 0xff, 0x07, 0x0f, 0x04, 0x0f, 0x08, 0x0f, 0x08, 0x0f, 0x04, 
+0xff, 0x07, 0x00, 0x00};
 // 'b4', 12x8px
-const unsigned char b_4[] PROGMEM = {0x00, 0x00, 0xff, 0xe0, 0xf8, 0x20,
-                                     0xf8, 0x10, 0xf8, 0x10, 0xf8, 0x20,
-                                     0xff, 0xe0, 0x00, 0x00};
+const unsigned char b_4[] PROGMEM = {0x00, 0x00, 0xff, 0x07, 0x1f, 0x04, 0x1f, 0x08, 0x1f, 0x08, 0x1f, 0x04, 
+0xff, 0x07, 0x00, 0x00};
 // 'b5', 12x8px
-const unsigned char b_5[] PROGMEM = {0x00, 0x00, 0xff, 0xe0, 0xfc, 0x20,
-                                     0xfc, 0x10, 0xfc, 0x10, 0xfc, 0x20,
-                                     0xff, 0xe0, 0x00, 0x00};
+const unsigned char b_5[] PROGMEM = {0x00, 0x00, 0xff, 0x07, 0x3f, 0x04, 0x3f, 0x08, 0x3f, 0x08, 0x3f, 0x04, 
+0xff, 0x07, 0x00, 0x00};
 // 'b6', 12x8px
-const unsigned char b_6[] PROGMEM = {0x00, 0x00, 0xff, 0xe0, 0xfe, 0x20,
-                                     0xfe, 0x10, 0xfe, 0x10, 0xfe, 0x20,
-                                     0xff, 0xe0, 0x00, 0x00};
+const unsigned char b_6[] PROGMEM = {0x00, 0x00, 0xff, 0x07, 0x7f, 0x04, 0x7f, 0x08, 0x7f, 0x08, 0x7f, 0x04, 
+0xff, 0x07, 0x00, 0x00};
 // 'b7', 12x8px
-const unsigned char b_7[] PROGMEM = {0x00, 0x00, 0xff, 0xe0, 0xff, 0x20,
-                                     0xff, 0x10, 0xff, 0x10, 0xff, 0x20,
-                                     0xff, 0xe0, 0x00, 0x00};
+const unsigned char b_7[] PROGMEM = {0x00, 0x00, 0xff, 0x07, 0xff, 0x04, 0xff, 0x08, 0xff, 0x08, 0xff, 0x04, 
+0xff, 0x07, 0x00, 0x00};
 // 'b8', 12x8px
-const unsigned char b_8[] PROGMEM = {0x00, 0x00, 0xff, 0xe0, 0xff, 0xa0,
-                                     0xff, 0x90, 0xff, 0x90, 0xff, 0xa0,
-                                     0xff, 0xe0, 0x00, 0x00};
+const unsigned char b_8[] PROGMEM = {0x00, 0x00, 0xff, 0x07, 0xff, 0x05, 0xff, 0x09, 0xff, 0x09, 0xff, 0x05, 
+0xff, 0x07, 0x00, 0x00};
 // 'b9', 12x8px
-const unsigned char b_9[] PROGMEM = {0x00, 0x00, 0xff, 0xe0, 0xff, 0xe0,
-                                     0xff, 0xd0, 0xff, 0xd0, 0xff, 0xe0,
-                                     0xff, 0xe0, 0x00, 0x00};
+const unsigned char b_9[] PROGMEM = {0x00, 0x00, 0xff, 0x07, 0xff, 0x07, 0xff, 0x0b, 0xff, 0x0b, 0xff, 0x07, 
+0xff, 0x07, 0x00, 0x00};
 // 'b10', 12x8px
-const unsigned char b_10[] PROGMEM = {0x00, 0x00, 0xff, 0xe0, 0xff, 0xe0,
-                                      0xff, 0xf0, 0xff, 0xf0, 0xff, 0xe0,
-                                      0xff, 0xe0, 0x00, 0x00};
+const unsigned char b_10[] PROGMEM = {0x00, 0x00, 0xff, 0x07, 0xff, 0x07, 0xff, 0x0f, 0xff, 0x0f, 0xff, 0x07, 
+0xff, 0x07, 0x00, 0x00};
 
 // Array of all bitmaps for convenience. (Total bytes used to store images in
 // PROGMEM = 352)
 const unsigned char *battery_level[12] = {b_bl, b_0, b_1, b_2, b_3, b_4,
                                           b_5,  b_6, b_7, b_8, b_9, b_10};
 
-const unsigned char blank[] PROGMEM = {
-    // 'blank, 8x8px
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+const unsigned char blank[] PROGMEM = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
 // 'no signal', 11x8px
-const unsigned char epd_bitmap_no_wifi[] PROGMEM = {
-    0x90, 0x40, 0x60, 0x40, 0x61, 0x40, 0x91, 0x40,
-    0x05, 0x40, 0x05, 0x40, 0x15, 0x40, 0x55, 0x40};
+const unsigned char epd_bitmap_no_wifi[] PROGMEM = {0x09, 0x02, 0x06, 0x02, 0x86, 0x02, 0x89, 0x02, 0xa0, 0x02, 0xa0, 0x02, 
+0xa8, 0x02, 0xaa, 0x02};
 // 'signal', 11x8px
-const unsigned char epd_bitmap_wifi[] PROGMEM = {
-    0x00, 0x40, 0x00, 0x40, 0x01, 0x40, 0x01, 0x40,
-    0x05, 0x40, 0x05, 0x40, 0x15, 0x40, 0x55, 0x40};
+const unsigned char epd_bitmap_wifi[] PROGMEM = {0x00, 0x02, 0x00, 0x02, 0x80, 0x02, 0x80, 0x02, 0xa0, 0x02, 0xa0, 0x02, 
+0xa8, 0x02, 0xaa, 0x02};
 
-const unsigned char dataicon[] PROGMEM = {
-    // 'data, 8x8px
-    0x20, 0x64, 0xe4, 0x24, 0x24, 0x27, 0x26, 0x04};
+const unsigned char dataicon[] PROGMEM = {0x04, 0x26, 0x27, 0x24, 0x24, 0xe4, 0x64, 0x20};
 
 // 'No card', 11x8px
-const unsigned char No_card [] PROGMEM = {
-	0xf6, 0x00, 0x89, 0xe0, 0xa4, 0x20, 0x99, 0xa0, 0x98, 0x20, 0xa5, 0xa0, 0x80, 0x20, 0xff, 0xe0
-};
+const unsigned char No_card[] PROGMEM = {0x6f, 0x00, 0x91, 0x07, 0x25, 0x04, 0x99, 0x05, 0x19, 0x04, 0xa5, 0x05, 
+0x01, 0x04, 0xff, 0x07};
 // 'card', 11x8px
-const unsigned char card [] PROGMEM = {
-	0xf6, 0x00, 0x89, 0xe0, 0x80, 0x20, 0x81, 0xa0, 0x80, 0x20, 0x81, 0xa0, 0x80, 0x20, 0xff, 0xe0
-};
+const unsigned char card[] PROGMEM = {0x6f, 0x00, 0x91, 0x07, 0x01, 0x04, 0x81, 0x05, 0x01, 0x04, 0x81, 0x05, 
+0x01, 0x04, 0xff, 0x07};
 
 bool sd_status = false; // Global SD status
 
@@ -346,27 +332,27 @@ byte state;
 
 
 // 'Update Check', 11x8px
-const unsigned char myBitmapUpdate_Check [] PROGMEM = {
-	0x5f, 0x00, 0x60, 0x80, 0x70, 0x40, 0x00, 0x00, 0x00, 0x00, 0x41, 0xc0, 0x20, 0xc0, 0x1f, 0x40
-};
+const unsigned char myBitmapUpdate_Check[] PROGMEM = {0xfa, 0x00, 0x06, 0x01, 0x0e, 0x02, 0x00, 0x00, 0x00, 0x00, 0x82, 0x03, 
+0x04, 0x03, 0xf8, 0x02};
 // 'Updated', 11x8px
-const unsigned char myBitmapUpdated [] PROGMEM = {
-	0x5f, 0x00, 0x60, 0x80, 0x70, 0x40, 0x02, 0x00, 0x14, 0x00, 0x49, 0xc0, 0x20, 0xc0, 0x1f, 0x40
-};
+const unsigned char myBitmapUpdated[] PROGMEM = {0xfa, 0x00, 0x06, 0x01, 0x0e, 0x02, 0x40, 0x00, 0x28, 0x00, 0x92, 0x03, 
+0x04, 0x03, 0xf8, 0x02};
 
 // 'Download', 11x8px
-const unsigned char myBitmapOTA_udate [] PROGMEM = {
-	0x06, 0x00, 0x06, 0x00, 0x06, 0x00, 0x06, 0x00, 0x06, 0x00, 0x16, 0x80, 0x0f, 0x00, 0x06, 0x00
-};
+const unsigned char myBitmapOTA_udate[] PROGMEM = {0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x68, 0x01, 
+0xf0, 0x00, 0x60, 0x00};
 
 int otaIconState = 0; // 0=None, 1=Checking, 2=Downloading, 3=Updated
 
 void printText(const char *text, int x = 0, int y = 0, int size = 1) {
-  display.setTextSize(size);
-  display.setTextColor(SH110X_WHITE, SH110X_BLACK);
+  if (size == 1) display.setFont(u8g2_font_6x10_tf);
+  else if (size == 2) display.setFont(u8g2_font_7x14B_tf);
+  else display.setFont(u8g2_font_courB18_tf);
+  
+  display.setDrawColor(1);
   display.setCursor(x, y);
   display.print(text);
-  // Note: display.display() moved to end of oled_display_update() to prevent artifacts
+  // Note: display.sendBuffer() is manual
 }
 
 void printText(String text, int x = 0, int y = 0, int size = 1) {
@@ -1311,9 +1297,8 @@ bool sendDataToESP32() {
   }
 
   // Show data sending icon
-  display.drawBitmap(75, 0, dataicon, 8, 8, SH110X_WHITE,
-                     SH110X_BLACK);
-  display.display();
+  display.setDrawColor(1); display.drawXBMP(75, 0, 8, 8, dataicon);
+  display.sendBuffer();
 
   Serial.println(F("Sending data to ESP32..."));
   Serial.print(F("Payload: "));
@@ -1350,9 +1335,9 @@ bool sendDataToESP32() {
   }
 
   // Clear data icon
-  display.drawBitmap(75, 0, blank, 8, 8, SH110X_WHITE,
-                     SH110X_BLACK);
-  display.display();
+  // Clear data icon
+  display.setDrawColor(1); display.drawXBMP(75, 0, 8, 8, blank);
+  display.sendBuffer();
 
   if (response == "OK") {
     Serial.println(F("ESP32: Data sent successfully!"));
@@ -1402,12 +1387,12 @@ void checkESP32Messages() {
           jiofi_restarting = false;
         } else {
           Serial.println(F("Max JioFi retries reached. Running in offline mode."));
-          display.clearDisplay();
+          display.clearBuffer();
           centerText(F("JioFi Failed"), 20);
           centerText(F("Offline Mode"), 35);
-          display.display();
+          display.sendBuffer();
           wdtDelay(3000);
-          display.clearDisplay();
+          display.clearBuffer();
         }
       } else {
         Serial.println(F("(Restart already in progress, skipping)"));
@@ -1417,24 +1402,24 @@ void checkESP32Messages() {
       Serial.println(F("ESP32 is ready!"));
 
       // Clear OLED display
-      display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
-      display.display();
+      display.setDrawColor(0); display.drawBox(0, 11, SCREEN_WIDTH, 54); display.setDrawColor(1);;
+      display.sendBuffer();
       
       // If OTA was in progress and ESP32 just rebooted, OTA is done!
       if (otaInProgress) {
         Serial.println(F("ESP32 rebooted after OTA - update successful!"));
-        display.clearDisplay();
+        display.clearBuffer();
         centerText(F("OTA Complete!"), 20);
         centerText(F("ESP32 Rebooted OK"), 40);
-        display.display();
+        display.sendBuffer();
         wdtDelay(3000);
         otaInProgress = false; // Unlock display
-        display.clearDisplay();
+        display.clearBuffer();
         // Force immediate full display refresh
         clear_area_update();
         oled_display_update();
         drawWiFiIcon();
-        display.display();
+        display.sendBuffer();
       }
     }
     // Handle SSE commands from server (via ESP32)
@@ -1456,22 +1441,22 @@ void checkESP32Messages() {
       // Handle LTE Status Commands
       if (message == "CMD:LTE_OK") {
         Serial.println(F("✅ LTE Status: Attached"));
-        display.clearDisplay();
+        display.clearBuffer();
         centerText(F("WiFi Connected"), 0);
         centerText(F("LTE Status:"), 20);
         centerText(F("Attached"), 32);
-        display.display();
+        display.sendBuffer();
         wdtDelay(3000); // Watchdog-safe
-        display.clearDisplay();
+        display.clearBuffer();
       } else if (message == "CMD:LTE_FAIL") {
         Serial.println(F("❌ LTE Status: Not Attached"));
         
         // Skip restart if already in a restart process
         if (!jiofi_restarting) {
-          display.clearDisplay();
+          display.clearBuffer();
           centerText(F("LTE Not Attached"), 8);
           centerText(F("Restarting JioFi.."), 24);
-          display.display();
+          display.sendBuffer();
           wdtDelay(2000);
           
           // Auto-restart JioFi on LTE failure
@@ -1488,12 +1473,12 @@ void checkESP32Messages() {
             jiofi_restarting = false;
           } else {
             Serial.println(F("Max JioFi/LTE retries reached. Continuing..."));
-            display.clearDisplay();
+            display.clearBuffer();
             centerText(F("LTE Failed"), 20);
             centerText(F("Max Retries Hit"), 35);
-            display.display();
+            display.sendBuffer();
             wdtDelay(3000);
-            display.clearDisplay();
+            display.clearBuffer();
           }
         } else {
           Serial.println("(LTE restart already in progress, skipping)");
@@ -1534,10 +1519,10 @@ void checkESP32Messages() {
               Serial.println(F("═══════════════════════════════════"));
 
               // Show feedback on OLED
-              display.clearDisplay();
+              display.clearBuffer();
               centerText(F("Config Updated!"), 0);
-              display.setTextSize(1);
-              display.setTextColor(SH110X_WHITE, SH110X_BLACK);
+              //display.setTextSize(...);
+              //display.setTextColor(...);
               display.setCursor(10, 16);
               display.print(F("Old: "));
               display.print(oldInterval / 1000);
@@ -1546,9 +1531,9 @@ void checkESP32Messages() {
               display.print(F("New: "));
               display.print(newInterval / 1000);
               display.print(F("s"));
-              display.display();
+              display.sendBuffer();
               delay(3000);
-              display.clearDisplay();
+              display.clearBuffer();
             } else {
               Serial.print(F("❌ Invalid interval: "));
               Serial.print(newInterval);
@@ -1563,13 +1548,13 @@ void checkESP32Messages() {
             Serial.println(F("═══════════════════════════════════"));
             
             // Show on OLED briefly
-            display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
+            display.setDrawColor(0); display.drawBox(0, 11, SCREEN_WIDTH, 54); display.setDrawColor(1);;
             centerText(F("ESP32 Firmware"), 20);
             String verStr = "v" + cmdValue;
             centerText(verStr, 38);
-            display.display();
+            display.sendBuffer();
             wdtDelay(2000);
-            display.clearDisplay();
+            display.clearBuffer();
           }
         } else {
           // Command without value
@@ -1577,9 +1562,9 @@ void checkESP32Messages() {
             Serial.println(F("✅ SSE Command: Reset requested"));
 
             // Show reset message
-            display.clearDisplay();
+            display.clearBuffer();
             centerText(F("Resetting..."), 20);
-            display.display();
+            display.sendBuffer();
             delay(1000);
 
             // Perform soft reset (restart ESP32 connection)
@@ -1591,64 +1576,64 @@ void checkESP32Messages() {
             Serial.println(F("ESP32 checking for OTA update..."));
             otaIconState = 1; // Checking
             // Show Update Check icon at x=102
-            display.drawBitmap(102, 0, myBitmapUpdate_Check, 11, 8, SH110X_WHITE, SH110X_BLACK);
-            display.display();
+            display.setDrawColor(1); display.drawXBMP(102, 0, 11, 8, myBitmapUpdate_Check);
+            display.sendBuffer();
           }
           else if (command == "OTA_START") {
             Serial.println(F("ESP32 OTA update started!"));
             otaInProgress = true; // Lock display
             otaIconState = 2; // Downloading
-            display.clearDisplay();
+            display.clearBuffer();
             // Show Download icon at x=102
-            display.drawBitmap(102, 0, myBitmapOTA_udate, 11, 8, SH110X_WHITE, SH110X_BLACK);
+            display.setDrawColor(1); display.drawXBMP(102, 0, 11, 8, myBitmapOTA_udate);
             
             centerText(F("OTA Update"), 10);
             centerText(F("Updating ESP32..."), 30);
             centerText(F("Do NOT power off!"), 50);
-            display.display();
+            display.sendBuffer();
           }
           else if (command == "OTA_DONE") {
             Serial.println(F("ESP32 OTA update complete!"));
-            display.clearDisplay();
+            display.clearBuffer();
             otaIconState = 3; // Updated
             // Show Updated icon at x=102
-            display.drawBitmap(102, 0, myBitmapUpdated, 11, 8, SH110X_WHITE, SH110X_BLACK);
+            display.setDrawColor(1); display.drawXBMP(102, 0, 11, 8, myBitmapUpdated);
 
             centerText(F("OTA Complete!"), 20);
             centerText(F("ESP32 Rebooting..."), 40);
-            display.display();
+            display.sendBuffer();
             wdtDelay(3000);
             otaInProgress = false; // Unlock display
-            display.clearDisplay();
+            display.clearBuffer();
             // Force immediate full display refresh
             clear_area_update();
             oled_display_update();
             drawWiFiIcon();
-            display.display();
+            display.sendBuffer();
           }
           else if (command == "OTA_FAIL") {
             Serial.println(F("ESP32 OTA update failed!"));
             otaIconState = 0; // Clear icon or keep last? Clear for fail.
-            display.clearDisplay();
+            display.clearBuffer();
             centerText(F("OTA Update Failed"), 25);
             centerText(F("Resuming normal..."), 45);
-            display.display();
+            display.sendBuffer();
             wdtDelay(3000);
             otaInProgress = false; // Unlock display
-            display.clearDisplay();
+            display.clearBuffer();
             // Force immediate full display refresh
             clear_area_update();
             oled_display_update();
             drawWiFiIcon();
-            display.display();
+            display.sendBuffer();
           }
           else if (command == "OTA_UPTODATE") {
             Serial.println(F("Firmware is up to date."));
             otaIconState = 3; // Updated
             Serial.print(F("OTA State set to: ")); Serial.println(otaIconState);
             // Show Updated icon at x=102 (Always display)
-            display.drawBitmap(102, 0, myBitmapUpdated, 11, 8, SH110X_WHITE, SH110X_BLACK);
-            display.display();
+            display.setDrawColor(1); display.drawXBMP(102, 0, 11, 8, myBitmapUpdated);
+            display.sendBuffer();
           }
         }
       }
@@ -1673,17 +1658,15 @@ void checkESP32Messages() {
 // Draw WiFi signal icon
 void drawWiFiIcon() {
   if (wifi_status == 1) {
-    display.drawBitmap(SCREEN_WIDTH - 11, 0, epd_bitmap_wifi, 11, 8,
-                       SH110X_WHITE, SH110X_BLACK);
+    display.setDrawColor(1); display.drawXBMP(117, 0, 11, 8, epd_bitmap_wifi);
   } else {
-    display.drawBitmap(SCREEN_WIDTH - 11, 0, epd_bitmap_no_wifi, 11, 8,
-                       SH110X_WHITE, SH110X_BLACK);
+    display.setDrawColor(1); display.drawXBMP(117, 0, 11, 8, epd_bitmap_no_wifi);
   }
 }
 
 void clear_area_update() {
   if (otaInProgress) return; // Don't touch display during OTA
-  display.fillRect(0, 14, 74, 50, SH110X_BLACK);  // Height: 50 (y=14 to y=64)
+  display.setDrawColor(0); display.drawBox(0, 14, 74, 50); display.setDrawColor(1);;  // Height: 50 (y=14 to y=64)
   if (page == 1) {
     Serial.println(F("Page 1"));
     page = 2;
@@ -1711,12 +1694,12 @@ void oled_display_update() {
 
   // Battery icon - show empty battery (or connect voltage sensor to calculate
   // actual level)
-  display.drawBitmap(SCREEN_WIDTH - 128, 0, battery_level[0], 12, 8,
-                     SH110X_WHITE, SH110X_BLACK);
+  //display.drawBitmap(SCREEN_WIDTH - 128, 0, battery_level[0], 12, 8,
+// 1, 0);
 
   // Note: To display actual voltage, connect a voltage sensor and update
-  // sensorData.voltage Then uncomment below: display.setTextSize(1);
-  // display.setTextColor(SH110X_WHITE, SH110X_BLACK);
+  // sensorData.voltage Then uncomment below: //display.setTextSize(...);
+  // //display.setTextColor(...);
   // display.setCursor(14, 0);
   // display.print(sensorData.voltage, 1);
   // display.print("V");
@@ -1724,35 +1707,35 @@ void oled_display_update() {
   // Draw SD Card Icon (Left of WiFi)
   // WiFi is at -11 (x=117). OTA is at x=102. SD should be at x=87.
   if (sd_status) {
-    display.drawBitmap(87, 0, card, 11, 8, SH110X_WHITE, SH110X_BLACK);
+    display.setDrawColor(1); display.drawXBMP(87, 0, 11, 8, card);
   } else {
-    display.drawBitmap(87, 0, No_card, 11, 8, SH110X_WHITE, SH110X_BLACK);
+    display.setDrawColor(1); display.drawXBMP(87, 0, 11, 8, No_card);
   }
 
   // Draw OTA Icon based on state
   if (otaIconState == 1) { // Checking
-     display.drawBitmap(102, 0, myBitmapUpdate_Check, 11, 8, SH110X_WHITE, SH110X_BLACK);
+     display.setDrawColor(1); display.drawXBMP(102, 0, 11, 8, myBitmapUpdate_Check);
   } else if (otaIconState == 2) { // Downloading
-     display.drawBitmap(102, 0, myBitmapOTA_udate, 11, 8, SH110X_WHITE, SH110X_BLACK);
+     display.setDrawColor(1); display.drawXBMP(102, 0, 11, 8, myBitmapOTA_udate);
   } else if (otaIconState == 3) { // Updated
-     display.drawBitmap(102, 0, myBitmapUpdated, 11, 8, SH110X_WHITE, SH110X_BLACK);
+     display.setDrawColor(1); display.drawXBMP(102, 0, 11, 8, myBitmapUpdated);
   }
 
   // Draw separator line
-  display.drawFastHLine(0, 10, SCREEN_WIDTH, SH110X_WHITE);
+  display.drawHLine(0, 10, SCREEN_WIDTH);
   // Draw vertical separator line
-  display.drawFastVLine(74, 10, 54, SH110X_WHITE);
+  display.drawVLine(74, 10, 54);
 
   // AQI Label and Value
   printText("AQI", 94, 16);
-  if (sensorData.aqi < 10) {
-    printText(String(sensorData.aqi), 96, 30, 2);
-  }
-  if (sensorData.aqi > 9 && sensorData.aqi < 100) {
-    printText(String(sensorData.aqi), 90, 30, 2);
-  } else if (sensorData.aqi > 100) {
-    printText(String(sensorData.aqi), 84, 30, 2);
-  }
+  // Center AQI Value (Size 3)
+  display.setFont(u8g2_font_courB18_tf);
+  display.setDrawColor(1);
+  String aqiStr = String(sensorData.aqi);
+  int valW = display.getStrWidth(aqiStr.c_str());
+  // "AQI" text at 94 (width ~18) -> Center approx 103
+  display.setCursor(103 - (valW / 2), 30);
+  display.print(aqiStr);
 
   if (page == 1) {
     printText("PM2.5:", 0, 14);
@@ -1803,7 +1786,7 @@ void oled_display_update() {
   }
   
   // Update display once after all text is drawn (prevents artifacts from multiple refreshes)
-  display.display();
+  display.sendBuffer();
 }
 
 void esp32_status_update() {
@@ -1813,14 +1796,14 @@ void esp32_status_update() {
   ESP32_SERIAL.println("CMD:SD_STAT"); // Also check SD status
   checkESP32Messages();
   drawWiFiIcon();
-  display.display();
+  display.sendBuffer();
 }
 
 void data_send_update() {
   // Generate random test data
   generateTestData();
-  display.fillRect(84, 30, 120, 42, SH110X_BLACK);
-  display.display();
+  display.setDrawColor(0); display.drawBox(84, 30, 120, 42); display.setDrawColor(1);;
+  display.sendBuffer();
 
   // Send data to ESP32
   Serial.println(F("\n========== Sending Test Data =========="));
@@ -1873,20 +1856,23 @@ const bool nativeIsPPB[] = {false, false, true, false, true, true, true, false, 
 
 // Display Helper
 void centerText(String text, int y, int size = 1) {
-  int16_t x1, y1;
-  uint16_t w, h;
-  display.setTextSize(size);
-  display.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
-  int x = (SCREEN_WIDTH - w) / 2;
+  if (size == 1) display.setFont(u8g2_font_6x10_tf);
+  else if (size == 2) display.setFont(u8g2_font_7x14B_tf);
+  else display.setFont(u8g2_font_courB18_tf);
+
+  int w = display.getStrWidth(text.c_str());
+  int x = (128 - w) / 2;
+  
+  display.setDrawColor(1);
   display.setCursor(x, y);
   display.print(text);
 }
 
 // Perform Calculation and Save
 void performCalibration() {
-  display.clearDisplay();
+  display.clearBuffer();
   centerText(F("Calibrating..."), 20, 1);
-  display.display();
+  display.sendBuffer();
 
   // Disable ABC during calibration to avoid interference
   abcEnabled = false;
@@ -1914,10 +1900,10 @@ void performCalibration() {
     // If in heating phase, wait for sensing phase
     if (mq7Phase == MQ7_HEATING) {
       unsigned long remaining = MQ7_HEAT_DURATION - (millis() - mq7PhaseStart);
-      display.clearDisplay();
+      display.clearBuffer();
       centerText(F("MQ7: Waiting for"), 10);
       centerText(F("sensing phase..."), 22);
-      display.display();
+      display.sendBuffer();
       
       // Wait with countdown
       while (mq7Phase == MQ7_HEATING) {
@@ -1926,31 +1912,31 @@ void performCalibration() {
         unsigned long left = 0;
         if (millis() - mq7PhaseStart < MQ7_HEAT_DURATION)
           left = (MQ7_HEAT_DURATION - (millis() - mq7PhaseStart)) / 1000;
-        display.fillRect(0, 36, SCREEN_WIDTH, 16, SH110X_BLACK);
+        display.setDrawColor(0); display.drawBox(0, 36, SCREEN_WIDTH, 16); display.setDrawColor(1);;
         centerText(String(left) + "s remaining", 40);
-        display.display();
+        display.sendBuffer();
         delay(500);
       }
     }
     
     // Now in sensing phase — wait 30s for stabilization
-    display.clearDisplay();
+    display.clearBuffer();
     centerText(F("MQ7: Stabilizing"), 10);
     centerText(F("30s wait..."), 22);
-    display.display();
+    display.sendBuffer();
     
     for (int i = 30; i > 0; i--) {
       wdt_reset();
-      display.fillRect(0, 36, SCREEN_WIDTH, 16, SH110X_BLACK);
+      display.setDrawColor(0); display.drawBox(0, 36, SCREEN_WIDTH, 16); display.setDrawColor(1);;
       centerText(String(i) + "s remaining", 40);
-      display.display();
+      display.sendBuffer();
       delay(1000);
     }
     
     // Take PWM-filtered samples (same logic as readCO)
-    display.clearDisplay();
+    display.clearBuffer();
     centerText(F("MQ7: Sampling..."), 20);
-    display.display();
+    display.sendBuffer();
     
     int validCount = 0;
     float voltageSum = 0.0;
@@ -2166,9 +2152,9 @@ void performCalibration() {
 
 // Reset calibration to defaults
 void resetCalibration() {
-    display.clearDisplay();
+    display.clearBuffer();
     centerText(F("Resetting..."), 20, 1);
-    display.display();
+    display.sendBuffer();
     
     // Restore defaults
     calib = { 
@@ -2194,16 +2180,16 @@ void handleMenu() {
   wdt_reset(); // Feed watchdog while menu is active (loop() is blocked)
 
   if (redraw) {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SH110X_WHITE);
+    display.clearBuffer();
+    //display.setTextSize(...);
+    //display.setTextColor(...);
 
     int lineHeight = 10; // 8px font + 5px space
     int startY = 12; // Title height + space
 
     if (menuState == 1) { // Main Menu
       centerText(F("=== MENU ==="), 0, 1);
-      display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+      display.drawLine(0, 9, 128, 9);
       
       const char* mainItems[] = {"1. Calibrate", "2. Sensors", "3. Net Config", "4. Unit System", "5. SD Card", "6. Reset", "7. About", "8. Exit"};
       int totalItems = 8;
@@ -2226,7 +2212,7 @@ void handleMenu() {
     }
     else if (menuState == 10) { // SD Card Menu
        centerText(F("= SD CARD ="), 0, 1);
-       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       display.drawLine(0, 9, 128, 9);
        
        const char* sdItems[] = {"1. Status", "2. Clear Logs", "3. Clear Data", "4. Format SD", "5. Back"};
        int totalItems = 5;
@@ -2241,7 +2227,7 @@ void handleMenu() {
     }
     else if (menuState == 2) { // Calibration Select
       centerText(F("= SENSORS ="), 0, 1);
-      display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+      display.drawLine(0, 9, 128, 9);
 
       int totalItems = 11; // 10 Sensors + Back
       maxSelection = totalItems - 1;
@@ -2265,7 +2251,7 @@ void handleMenu() {
 
     else if (menuState == 21) { // Calibration Mode Select
        centerText(F("= CALIB MODE ="), 0, 1);
-       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       display.drawLine(0, 9, 128, 9);
        
        const char* optItems[] = {"1. Zero Cal (0 ppm)", "2. Span Cal (Std)", "3. R0 / Baseline", "4. Back"};
        int totalItems = 4;
@@ -2282,7 +2268,7 @@ void handleMenu() {
     else if (menuState == 3) { // Calibration Set PPM
 
       centerText(F("= SET TARGET ="), 0, 1);
-      display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+      display.drawLine(0, 9, 128, 9);
       
       display.setCursor(0, 15);
       display.print(F("Sensor: ")); display.println(sensorNames[selectedSensorIndex]);
@@ -2375,7 +2361,7 @@ void handleMenu() {
     }
     else if (menuState == 31) { // Confirm Calibration Action
        centerText(F("= ACTION ="), 0, 1);
-       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       display.drawLine(0, 9, 128, 9);
        
        const char* actItems[] = {"1. Save & Exit", "2. Continue Edit", "3. Exit (No Save)"};
        int totalItems = 3;
@@ -2394,7 +2380,7 @@ void handleMenu() {
 
     else if (menuState == 5) { // Network Config Submenu
       centerText(F("= NET CONFIG ="), 0, 1);
-      display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+      display.drawLine(0, 9, 128, 9);
 
       const char* netItems[] = {"1. Status", "2. SSID", "3. Password", "4. Back"};
       int totalItems = 4;
@@ -2409,27 +2395,27 @@ void handleMenu() {
     }
     else if (menuState == 51) { // Net: Status
        centerText(F("= NET STATUS ="), 0, 1);
-       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       display.drawLine(0, 9, 128, 9);
        centerText(wifi_status ? F("Connected") : F("Disconnected"), 25, 1);
        centerText(F("[Click to Back]"), 50, 1);
     }
     else if (menuState == 52) { // Net: SSID
        centerText(F("= SSID ="), 0, 1);
-       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       display.drawLine(0, 9, 128, 9);
        centerText(F("SSID: JIOFI_xxxx"), 20, 1);
        centerText(F("(View Only)"), 35, 1);
        centerText(F("[Click to Back]"), 50, 1);
     }
     else if (menuState == 53) { // Net: Password
        centerText(F("= PASSWORD ="), 0, 1);
-       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       display.drawLine(0, 9, 128, 9);
        centerText(F("Pass: ********"), 20, 1);
        centerText(F("(View Only)"), 35, 1);
        centerText(F("[Click to Back]"), 50, 1);
     }
     else if (menuState == 6) { // Reset
        centerText(F("= RESET ="), 0, 1);
-       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       display.drawLine(0, 9, 128, 9);
        
         const char* rstItems[] = {"1. System Reboot", "2. Reset Params", "3. Back"};
         int totalItems = 3;
@@ -2444,14 +2430,14 @@ void handleMenu() {
     }
     else if (menuState == 7) { // About
        centerText(F("= ABOUT ="), 0, 1);
-       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       display.drawLine(0, 9, 128, 9);
        centerText(F("AQI Monitor v1.2"), 20, 1);
        centerText(F("Dev: Mega + ESP32"), 32, 1);
        centerText(F("[Click to Back]"), 50, 1);
     }
     else if (menuState == 9) { // Unit System
        centerText(F("= UNIT SYSTEM ="), 0, 1);
-       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       display.drawLine(0, 9, 128, 9);
        
        // Create a list menu structure
        const char* unitItems[] = {
@@ -2470,7 +2456,7 @@ void handleMenu() {
     }
     else if (menuState == 8) { // Sensor Enable/Disable
        centerText(F("= SENSORS ="), 0, 1);
-       display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+       display.drawLine(0, 9, 128, 9);
        
        const char* sensorLabels[] = {"CO", "CO2", "O3", "NH3", "NO2", "SO2", "TVOC", "PM10", "PM2.5", "PM1.0", "Back"};
        int totalItems = 11; // 10 sensors + Back
@@ -2503,7 +2489,7 @@ void handleMenu() {
        }
     }
 
-    display.display();
+    display.sendBuffer();
     redraw = false;
   }
   
@@ -2585,7 +2571,7 @@ void checkEncoder() {
         else if (menuSelection == 7) { 
            menuActive = false; 
            menuState = 0; 
-           display.clearDisplay(); 
+           display.clearBuffer(); 
            esp32_fail_count = 0;
         } // Exit
       }
@@ -2601,10 +2587,10 @@ void checkEncoder() {
              sendSDCommand("CMD:SD_DEL:data.csv", "Data Cleared");
           }
           else if (menuSelection == 3) { // Format
-             display.clearDisplay();
+             display.clearBuffer();
              centerText(F("Formatting..."), 20, 1);
              centerText(F("PLEASE WAIT"), 35, 1);
-             display.display();
+             display.sendBuffer();
              sendSDCommand("CMD:SD_FMT", "Format Done");
           }
           else if (menuSelection == 4) { // Back
@@ -2684,9 +2670,9 @@ void checkEncoder() {
       }
       else if (menuState == 6) { // Reset Submenu
          if (menuSelection == 0) { // System Reboot
-             display.clearDisplay();
+             display.clearBuffer();
              centerText(F("Rebooting..."), 20, 1);
-             display.display();
+             display.sendBuffer();
              delay(1000);
              wdt_enable(WDTO_15MS);
              while(1);
@@ -2736,9 +2722,9 @@ void checkEncoder() {
 
 void connectJioFi() {
   // Turning on
-  display.clearDisplay();
+  display.clearBuffer();
   centerText(F("Turning on JioFi.."), 20);
-  display.display();
+  display.sendBuffer();
   Serial.println(F("Turning on JioFi..."));
   
   pinMode(jiofi_switch, OUTPUT);
@@ -2747,9 +2733,9 @@ void connectJioFi() {
   digitalWrite(jiofi_switch, HIGH);
   
   // Waiting for network
-  display.clearDisplay();
+  display.clearBuffer();
   centerText(F("Waiting for Network"), 20);
-  display.display();
+  display.sendBuffer();
   
   // Wait loop handled by main loop checks
 }
@@ -2757,9 +2743,9 @@ void connectJioFi() {
 // ===== SD CARD HELPER FUNCTIONS =====
 
 void checkSDStatus() {
-  display.clearDisplay();
+  display.clearBuffer();
   centerText(F("Checking SD..."), 20, 1);
-  display.display();
+  display.sendBuffer();
   
   // Clear buffer
   while(ESP32_SERIAL.available()) ESP32_SERIAL.read();
@@ -2781,9 +2767,9 @@ void checkSDStatus() {
     }
   }
   
-  display.clearDisplay();
+  display.clearBuffer();
   centerText(F("= SD STATUS ="), 0, 1);
-  display.drawLine(0, 9, 128, 9, SH110X_WHITE);
+  display.drawLine(0, 9, 128, 9);
   
   if (received) {
     if (resp.indexOf("FAIL") > 0) {
@@ -2808,7 +2794,7 @@ void checkSDStatus() {
   }
   
   centerText(F("[Click to Back]"), 55, 1);
-  display.display();
+  display.sendBuffer();
   
   // Wait for button release (if still held from entering menu)
   while(digitalRead(ENC_SW) == LOW) {
@@ -2827,9 +2813,9 @@ void checkSDStatus() {
 }
 
 void sendSDCommand(String cmd, String successMsg) {
-  display.clearDisplay();
+  display.clearBuffer();
   centerText(F("Sending Cmd..."), 20, 1);
-  display.display();
+  display.sendBuffer();
   
   // Clear buffer
   while(ESP32_SERIAL.available()) ESP32_SERIAL.read();
@@ -2857,14 +2843,14 @@ void sendSDCommand(String cmd, String successMsg) {
     wdt_reset();
   }
   
-  display.clearDisplay();
+  display.clearBuffer();
   if(success) {
     centerText(successMsg, 20, 1);
     centerText(F("Success!"), 35, 1);
   } else {
     centerText(F("Command Failed"), 25, 1);
   }
-  display.display();
+  display.sendBuffer();
   delay(2000);
   redraw = true;
 }
@@ -2917,21 +2903,21 @@ void drawProgressBar(int x, int y, int width, int height, int progress) {
   if (progress > 100) progress = 100;
   
   // Draw border
-  display.drawRoundRect(x, y, width, height, 3, SH110X_WHITE);
+  display.drawRFrame(x, y, width, height, 3);
   
   // Fill interior
   int fillWidth = ((width - 4) * progress) / 100;
   if (fillWidth > 0) {
-    display.fillRoundRect(x + 2, y + 2, fillWidth, height - 4, 2, SH110X_WHITE);
+    display.drawRBox(x + 2, y + 2, fillWidth, height - 4, 2);
   }
 }
 
 // ===== BOOT SCREEN PHASES =====
 void showBootPhase(const char* label, int progress) {
-  display.fillRect(0, 38, SCREEN_WIDTH, 26, SH110X_BLACK); // Clear lower area
+  display.setDrawColor(0); display.drawBox(0, 38, SCREEN_WIDTH, 26); display.setDrawColor(1);; // Clear lower area
   centerText(label, 40);
   drawProgressBar(0, 52, SCREEN_WIDTH, 10, progress);
-  display.display();
+  display.sendBuffer();
 }
 
 // ===== SETUP =====
@@ -2946,35 +2932,36 @@ void setup() {
   
   // Power up OLED first
   delay(250); 
-  display.begin(i2c_Address, true);
-  display.clearDisplay();
+  display.begin();
+  display.setFontPosTop();
+  display.clearBuffer();
 
   // ===== BOOT ANIMATION =====
   // Phase 1: Title reveal
-  display.setTextColor(SH110X_WHITE);
+  //display.setTextColor(...);
   centerText(F("AQI"), 5, 2);
-  display.display();
+  display.sendBuffer();
   delay(400);
   
   centerText(F("Monitoring System"), 25);
-  display.display();
+  display.sendBuffer();
   delay(300);
   
   centerText(F("v2.0 | WiFi"), 38);
-  display.display();
+  display.sendBuffer();
   delay(300);
   
   // Decorative line sweep animation
   for (int i = 0; i < SCREEN_WIDTH; i += 4) {
-    display.drawFastHLine(0, 50, i, SH110X_WHITE);
-    display.display();
+    display.drawHLine(0, 50, i);
+    display.sendBuffer();
   }
   delay(500);
   
   // ===== SETUP PHASES WITH PROGRESS BAR =====
-  display.clearDisplay();
+  display.clearBuffer();
   centerText(F("System Starting Up"), 5);
-  display.drawFastHLine(0, 16, SCREEN_WIDTH, SH110X_WHITE);
+  display.drawHLine(0, 16, SCREEN_WIDTH);
   
   // Phase: Load config from EEPROM
   showBootPhase("Loading config...", 10);
@@ -3043,7 +3030,7 @@ void setup() {
   }
   
   // Show connection result
-  display.fillRect(0, 20, SCREEN_WIDTH, 18, SH110X_BLACK);
+  display.setDrawColor(0); display.drawBox(0, 20, SCREEN_WIDTH, 18); display.setDrawColor(1);;
   if (esp32_ready && wifi_status == 1) {
     centerText(F("WiFi: Connected!"), 24);
     Serial.println(F("ESP32 connected to WiFi!"));
@@ -3053,7 +3040,7 @@ void setup() {
   } else {
     centerText(F("ESP32: No Response"), 24);
     Serial.println(F("WARNING: ESP32 not responding!"));
-    display.display();
+    display.sendBuffer();
     delay(1000);
     hardResetESP32();
   }
@@ -3061,16 +3048,16 @@ void setup() {
   delay(500);
   
   // ===== SENSOR WARMUP COUNTDOWN =====
-  display.clearDisplay();
+  display.clearBuffer();
   centerText(F("Sensor Warmup"), 0);
-  display.drawFastHLine(0, 10, SCREEN_WIDTH, SH110X_WHITE);
+  display.drawHLine(0, 10, SCREEN_WIDTH);
   centerText(F("MQ sensors heating"), 15);
   centerText(F("Please wait..."), 27);
-  display.display();
+  display.sendBuffer();
   
   int warmupSeconds = 30;
   for (int i = warmupSeconds; i > 0; i--) {
-    display.fillRect(0, 38, SCREEN_WIDTH, 26, SH110X_BLACK);
+    display.setDrawColor(0); display.drawBox(0, 38, SCREEN_WIDTH, 26); display.setDrawColor(1);;
     
     // Time remaining - center dynamically
     String timeStr = String(i) + "s remaining";
@@ -3079,18 +3066,18 @@ void setup() {
     // Progress bar
     int progress = ((warmupSeconds - i) * 100) / warmupSeconds;
     drawProgressBar(0, 52, SCREEN_WIDTH, 10, progress);
-    display.display();
+    display.sendBuffer();
     delay(1000);
   }
   
   // ===== BOOT COMPLETE =====
-  display.clearDisplay();
+  display.clearBuffer();
   centerText(F("Ready!"), 10, 2);
   centerText(F("System Online"), 35);
   drawProgressBar(0, 52, SCREEN_WIDTH, 10, 100);
-  display.display();
+  display.sendBuffer();
   delay(1500);
-  display.clearDisplay();
+  display.clearBuffer();
 
   // Initialize MQ-7 heater cycling (start with heating phase)
   pinMode(MQ7_HEATER_PIN, OUTPUT);
@@ -3131,7 +3118,7 @@ void loop() {
   // Update WiFi status icon (skip during OTA to preserve OTA screen)
   if (!otaInProgress) {
     drawWiFiIcon();
-    display.display();
+    display.sendBuffer();
   }
 
   // Skip all ESP32 communication and display updates during OTA
@@ -3153,10 +3140,10 @@ void hardResetESP32() {
   wdt_reset(); // Feed watchdog before long operation
 
   // Show reset status on OLED
-  display.fillRect(0, 11, SCREEN_WIDTH, 54, SH110X_BLACK);
+  display.setDrawColor(0); display.drawBox(0, 11, SCREEN_WIDTH, 54); display.setDrawColor(1);;
   centerText(F("WiFi Not Connected"), 22);
   centerText(F("Resetting ESP32..."), 32);
-  display.display();
+  display.sendBuffer();
 
   Serial.println(F("Performing Hard Reset of ESP32..."));
   digitalWrite(ESP32_RESET_PIN, LOW);  // Hold in reset
@@ -3168,10 +3155,10 @@ void hardResetESP32() {
   wifi_status = 0;
 
   // Wait for ESP32 to boot and connect to WiFi (max 30 seconds)
-  display.clearDisplay();
+  display.clearBuffer();
   centerText(F("Waiting for ESP32"), 0);
   centerText(F("WiFi connection..."), 16);
-  display.display();
+  display.sendBuffer();
   Serial.println(F("Waiting for ESP32 to reconnect..."));
 
   unsigned long startTime = millis();
@@ -3183,26 +3170,26 @@ void hardResetESP32() {
     // Show waiting animation
     static int dots = 0;
     display.setCursor(0, 32);
-    display.setTextColor(SH110X_WHITE, SH110X_BLACK);
+    //display.setTextColor(...);
     for (int i = 0; i < 3; i++) {
       display.print(i < dots ? "." : " ");
     }
-    display.display();
+    display.sendBuffer();
     dots = (dots + 1) % 4;
   }
 
-  display.clearDisplay();
+  display.clearBuffer();
 
   if (esp32_ready && wifi_status == 1) {
     Serial.println(F("ESP32 reconnected to WiFi!"));
     centerText(F("WiFi: Reconnected!"), 20);
-    display.display();
+    display.sendBuffer();
     wdtDelay(1500);
   } else {
     Serial.println(F("ESP32 Reset Complete - WiFi not yet connected"));
     centerText(F("ESP32 Reset Done"), 20);
-    display.display();
+    display.sendBuffer();
     wdtDelay(1500);
   }
-  display.clearDisplay();
+  display.clearBuffer();
 }
