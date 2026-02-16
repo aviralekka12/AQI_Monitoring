@@ -2939,21 +2939,21 @@ void setup() {
   // ===== BOOT ANIMATION =====
   // Phase 1: Title reveal
   //display.setTextColor(...);
-  centerText(F("AQI"), 5, 2);
+  centerText(F("AQI"), 2, 3);
   display.sendBuffer();
   delay(400);
   
-  centerText(F("Monitoring System"), 25);
+  centerText(F("Monitoring System"), 28);
   display.sendBuffer();
   delay(300);
   
-  centerText(F("v2.0 | WiFi"), 38);
+  centerText(F("v2.0 | WiFi"), 42);
   display.sendBuffer();
   delay(300);
   
   // Decorative line sweep animation
   for (int i = 0; i < SCREEN_WIDTH; i += 4) {
-    display.drawHLine(0, 50, i);
+    display.drawHLine(0, 56, i);
     display.sendBuffer();
   }
   delay(500);
