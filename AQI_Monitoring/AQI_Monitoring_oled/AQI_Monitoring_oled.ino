@@ -345,9 +345,9 @@ const unsigned char myBitmapOTA_udate[] PROGMEM = {0x60, 0x00, 0x60, 0x00, 0x60,
 int otaIconState = 0; // 0=None, 1=Checking, 2=Downloading, 3=Updated
 
 void printText(const char *text, int x = 0, int y = 0, int size = 1) {
-  if (size == 1) display.setFont(u8g2_font_6x10_tf);
-  else if (size == 2) display.setFont(u8g2_font_7x14B_tf);
-  else display.setFont(u8g2_font_courB18_tf);
+  if (size == 1) display.setFont(u8g2_font_profont12_tf);
+  else if (size == 2) display.setFont(u8g2_font_profont15_tf);
+  else display.setFont(u8g2_font_profont29_tf);
   
   display.setDrawColor(1);
   display.setCursor(x, y);
@@ -1729,7 +1729,7 @@ void oled_display_update() {
   // AQI Label and Value
   printText("AQI", 94, 16);
   // Center AQI Value (Size 3)
-  display.setFont(u8g2_font_courB18_tf);
+  display.setFont(u8g2_font_profont29_tf);
   display.setDrawColor(1);
   String aqiStr = String(sensorData.aqi);
   int valW = display.getStrWidth(aqiStr.c_str());
@@ -1776,7 +1776,7 @@ void oled_display_update() {
     if(whoUnitMode) val = convertSO2ToWHO(val);
     printText(sensorEnabled[5] ? String(val, 1) : "OFF", 37, 34);
 
-    printText("TVOC :", 0, 44);
+    printText("VOC  :", 0, 44);
     val = readTVOC();
     if(whoUnitMode) val = convertTVOCToWHO(val);
     printText(sensorEnabled[6] ? String(val, 1) : "OFF", 37, 44);
@@ -1856,9 +1856,9 @@ const bool nativeIsPPB[] = {false, false, true, false, true, true, true, false, 
 
 // Display Helper
 void centerText(String text, int y, int size = 1) {
-  if (size == 1) display.setFont(u8g2_font_6x10_tf);
-  else if (size == 2) display.setFont(u8g2_font_7x14B_tf);
-  else display.setFont(u8g2_font_courB18_tf);
+  if (size == 1) display.setFont(u8g2_font_profont12_tf);
+  else if (size == 2) display.setFont(u8g2_font_profont15_tf);
+  else display.setFont(u8g2_font_profont29_tf);
 
   int w = display.getStrWidth(text.c_str());
   int x = (128 - w) / 2;
