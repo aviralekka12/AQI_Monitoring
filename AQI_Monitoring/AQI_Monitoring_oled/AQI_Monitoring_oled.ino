@@ -1692,17 +1692,9 @@ void oled_display_update() {
     sensorData.pm10 = p10;
   }
 
-  // Battery icon - show empty battery (or connect voltage sensor to calculate
-  // actual level)
-  //display.drawBitmap(SCREEN_WIDTH - 128, 0, battery_level[0], 12, 8,
-// 1, 0);
-
-  // Note: To display actual voltage, connect a voltage sensor and update
-  // sensorData.voltage Then uncomment below: //display.setTextSize(...);
-  // //display.setTextColor(...);
-  // display.setCursor(14, 0);
-  // display.print(sensorData.voltage, 1);
-  // display.print("V");
+  // Battery icon at top-left
+  display.setDrawColor(1);
+  display.drawXBMP(0, 0, 12, 8, battery_level[6]); // 0=blank,1=empty,6=half,11=full
 
   // Draw SD Card Icon (Left of WiFi)
   // WiFi is at -11 (x=117). OTA is at x=102. SD should be at x=87.
@@ -1727,14 +1719,27 @@ void oled_display_update() {
   display.drawVLine(74, 10, 54);
 
   // AQI Label and Value
-  printText("AQI", 94, 16);
-  // Center AQI Value (Size 3)
+  //printText("AQI", 92, 16, 2);
+  display.setFont(u8g2_font_profont15_tf);
+  display.setDrawColor(1);
+  String AQI = "AQI";
+  int AQI_valW = display.getStrWidth(AQI.c_str());
+  display.setCursor((((128-74)/2)+74) - (AQI_valW / 2), 16);
+  display.print(AQI);
+  
+  display.setFont(u8g2_font_profont12_tf);
+  display.setDrawColor(1);
+  String domin = String(sensorData.dominant_pollutant);
+  int domin_valW = display.getStrWidth(domin.c_str());
+  display.setCursor((((128-74)/2)+74) - (domin_valW / 2), 54);
+  display.print(domin);
+
   display.setFont(u8g2_font_profont29_tf);
   display.setDrawColor(1);
   String aqiStr = String(sensorData.aqi);
   int valW = display.getStrWidth(aqiStr.c_str());
   // "AQI" text at 94 (width ~18) -> Center approx 103
-  display.setCursor(103 - (valW / 2), 30);
+  display.setCursor((((128-74)/2)+74) - (valW / 2), 30);
   display.print(aqiStr);
 
   if (page == 1) {
@@ -1802,7 +1807,7 @@ void esp32_status_update() {
 void data_send_update() {
   // Generate random test data
   generateTestData();
-  display.setDrawColor(0); display.drawBox(84, 30, 120, 42); display.setDrawColor(1);;
+  display.setDrawColor(0); display.drawBox(75, 29, 128, 64); display.setDrawColor(1);;
   display.sendBuffer();
 
   // Send data to ESP32
@@ -1866,6 +1871,137 @@ void centerText(String text, int y, int size = 1) {
   display.setDrawColor(1);
   display.setCursor(x, y);
   display.print(text);
+}
+
+// ===== MENU UI HELPERS (Hybrid Sci-Fi Card Style) =====
+
+// Layout constants for 128x64 OLED with ProFont12 (6px wide, 8px ascent)
+#define MNU_TITLE_Y    0
+#define MNU_SEP_Y      11
+#define MNU_START_Y    14
+#define MNU_LINE_H     12
+#define MNU_VISIBLE    4
+#define MNU_BULLET_X   8
+#define MNU_TEXT_X     14
+
+// Track previous menu state for animations
+int prevMenuState = 0;
+
+// Draw title bar with triangle arrows and separator
+void drawMenuTitle(const __FlashStringHelper* title) {
+  display.setFont(u8g2_font_profont12_tf);
+  display.setDrawColor(1);
+  // Left arrow triangle
+  display.drawTriangle(1, 4, 6, 0, 6, 8);
+  // Right arrow triangle
+  display.drawTriangle(127, 4, 122, 0, 122, 8);
+  // Center title text
+  centerText(String(title), MNU_TITLE_Y, 1);
+  // Separator line
+  display.drawHLine(0, MNU_SEP_Y, 128);
+}
+
+
+// Draw right-aligned hint text at bottom
+void drawMenuHint(const __FlashStringHelper* hint) {
+  display.setFont(u8g2_font_profont12_tf);
+  display.setDrawColor(1);
+  String h = String(hint);
+  int hw = display.getStrWidth(h.c_str());
+  display.setCursor(126 - hw, 55);
+  display.print(hint);
+}
+
+// Draw a single menu item with triangle indicator
+void drawMenuItem(const char* text, int y, bool selected) {
+  display.setFont(u8g2_font_profont12_tf);
+  display.setDrawColor(1);
+  if (selected) {
+    // Filled right-pointing triangle
+    display.drawTriangle(3, y, 3, y + 8, 9, y + 4);
+  }
+  display.setCursor(MNU_TEXT_X, y);
+  display.print(text);
+}
+
+// Draw scrollbar for long lists (right edge)
+void drawScrollbar(int current, int total, int visible) {
+  if (total <= visible) return;
+  int barTop = MNU_START_Y;
+  int barH = (MNU_VISIBLE * MNU_LINE_H);
+  int thumbH = max(4, (barH * visible) / total);
+  int startIdx = 0;
+  if (current >= visible) startIdx = current - visible + 1;
+  int maxIdx = total - visible;
+  if (startIdx > maxIdx) startIdx = maxIdx;
+  int thumbY = barTop;
+  if (maxIdx > 0) thumbY = barTop + ((barH - thumbH) * startIdx) / maxIdx;
+  // Track dots
+  for (int y = barTop; y < barTop + barH; y += 2) {
+    display.drawPixel(127, y);
+  }
+  // Thumb block
+  display.drawBox(126, thumbY, 2, thumbH);
+}
+
+// Render a standard scrollable list menu
+void drawListMenu(const __FlashStringHelper* title, const char* items[],
+                   int totalItems, int sel) {
+  drawMenuTitle(title);
+  int startIdx = 0;
+  if (sel >= MNU_VISIBLE) startIdx = sel - MNU_VISIBLE + 1;
+  for (int i = 0; i < MNU_VISIBLE; i++) {
+    int idx = startIdx + i;
+    if (idx < totalItems) {
+      int y = MNU_START_Y + (i * MNU_LINE_H);
+      drawMenuItem(items[idx], y, idx == sel);
+    }
+  }
+  drawScrollbar(sel, totalItems, MNU_VISIBLE);
+}
+
+// Menu open animation: expanding rectangle from center
+void animateMenuOpen() {
+  for (int f = 1; f <= 4; f++) {
+    wdt_reset();
+    display.clearBuffer();
+    int w = (120 * f) / 4;
+    int h = (56 * f) / 4;
+    int x = (128 - w) / 2;
+    int y = (64 - h) / 2;
+    display.drawRFrame(x, y, w, h, 4);
+    display.sendBuffer();
+    delay(35);
+  }
+}
+
+// Menu close animation: contracting rectangle to center
+void animateMenuClose() {
+  for (int f = 4; f >= 1; f--) {
+    wdt_reset();
+    display.clearBuffer();
+    int w = (120 * f) / 4;
+    int h = (56 * f) / 4;
+    int x = (128 - w) / 2;
+    int y = (64 - h) / 2;
+    display.drawRFrame(x, y, w, h, 4);
+    display.sendBuffer();
+    delay(35);
+  }
+}
+
+// Transition wipe animation
+void animateWipe(bool forward) {
+  int stepW = 32;
+  for (int s = 0; s < 4; s++) {
+    wdt_reset();
+    display.setDrawColor(0);
+    if (forward) display.drawBox(s * stepW, 11, stepW, 43);
+    else         display.drawBox(128 - (s+1) * stepW, 11, stepW, 43);
+    display.setDrawColor(1);
+    display.sendBuffer();
+    delay(25);
+  }
 }
 
 // Perform Calculation and Save
@@ -2177,103 +2313,61 @@ void resetCalibration() {
 
 void handleMenu() {
   if (!menuActive) return;
-  wdt_reset(); // Feed watchdog while menu is active (loop() is blocked)
+  wdt_reset();
 
   if (redraw) {
     display.clearBuffer();
-    //display.setTextSize(...);
-    //display.setTextColor(...);
-
-    int lineHeight = 10; // 8px font + 5px space
-    int startY = 12; // Title height + space
+    display.setFont(u8g2_font_profont12_tf);
 
     if (menuState == 1) { // Main Menu
-      centerText(F("=== MENU ==="), 0, 1);
-      display.drawLine(0, 9, 128, 9);
-      
-      const char* mainItems[] = {"1. Calibrate", "2. Sensors", "3. Net Config", "4. Unit System", "5. SD Card", "6. Reset", "7. About", "8. Exit"};
-      int totalItems = 8;
-      maxSelection = totalItems - 1;
-
-      // Scrolling Window (Show 5 lines max)
-      int windowSize = 5;
-      int startIdx = 0;
-      if (menuSelection >= windowSize) startIdx = menuSelection - windowSize + 1;
-
-      for(int i=0; i<windowSize; i++) {
-         int idx = startIdx + i;
-         if (idx < totalItems) {
-             int y = startY + (i * lineHeight);
-             display.setCursor(0, y);
-             if(idx == menuSelection) display.print(F("> ")); else display.print(F("  "));
-             display.print(mainItems[idx]);
-         }
-      }
+      const char* items[] = {"Calibrate", "Sensors", "Network", "Units", "SD Card", "Reset", "About", "Exit"};
+      int total = 8;
+      maxSelection = total - 1;
+      drawListMenu(F("MAIN MENU"), items, total, menuSelection);
     }
+
     else if (menuState == 10) { // SD Card Menu
-       centerText(F("= SD CARD ="), 0, 1);
-       display.drawLine(0, 9, 128, 9);
-       
-       const char* sdItems[] = {"1. Status", "2. Clear Logs", "3. Clear Data", "4. Format SD", "5. Back"};
-       int totalItems = 5;
-       maxSelection = totalItems - 1;
-       
-       for(int i=0; i<totalItems; i++) {
-           int y = startY + (i * lineHeight);
-           display.setCursor(0, y);
-           if(i == menuSelection) display.print(F("> ")); else display.print(F("  "));
-           display.print(sdItems[i]);
-       }
+      const char* items[] = {"Status", "Clear Logs", "Clear Data", "Format SD", "Back"};
+      int total = 5;
+      maxSelection = total - 1;
+      drawListMenu(F("SD CARD"), items, total, menuSelection);
     }
-    else if (menuState == 2) { // Calibration Select
-      centerText(F("= SENSORS ="), 0, 1);
-      display.drawLine(0, 9, 128, 9);
 
-      int totalItems = 11; // 10 Sensors + Back
-      maxSelection = totalItems - 1;
-      
-      int windowSize = 5;
+    else if (menuState == 2) { // Sensor Select for Calibration
+      drawMenuTitle(F("SELECT SENSOR"));
+      int total = 11; // 10 sensors + Back
+      maxSelection = total - 1;
       int startIdx = 0;
-      if (menuSelection >= windowSize) startIdx = menuSelection - windowSize + 1;
-
-      for(int i=0; i<windowSize; i++) {
-         int idx = startIdx + i;
-         if (idx < totalItems) {
-            int y = startY + (i * lineHeight);
-            display.setCursor(0, y);
-            if(idx == menuSelection) display.print(F("> ")); else display.print(F("  "));
-            
-            if(idx < 10) display.print(sensorNames[idx]);
-            else display.print(F("Back"));
-         }
+      if (menuSelection >= MNU_VISIBLE) startIdx = menuSelection - MNU_VISIBLE + 1;
+      for (int i = 0; i < MNU_VISIBLE; i++) {
+        int idx = startIdx + i;
+        if (idx < total) {
+          int y = MNU_START_Y + (i * MNU_LINE_H);
+          if (idx < 10) drawMenuItem(sensorNames[idx], y, idx == menuSelection);
+          else          drawMenuItem("Back", y, idx == menuSelection);
+        }
       }
+      drawScrollbar(menuSelection, total, MNU_VISIBLE);
     }
 
-    else if (menuState == 21) { // Calibration Mode Select
-       centerText(F("= CALIB MODE ="), 0, 1);
-       display.drawLine(0, 9, 128, 9);
-       
-       const char* optItems[] = {"1. Zero Cal (0 ppm)", "2. Span Cal (Std)", "3. R0 / Baseline", "4. Back"};
-       int totalItems = 4;
-       maxSelection = totalItems - 1;
-       
-       for(int i=0; i<totalItems; i++) {
-           int y = startY + (i * lineHeight);
-           display.setCursor(0, y);
-           if(i == menuSelection) display.print(F("> ")); else display.print(F("  "));
-           display.print(optItems[i]);
-       }
+    else if (menuState == 21) { // Calibration Mode
+      const char* items[] = {"Zero Cal", "Span Cal", "R0/Baseline", "Back"};
+      int total = 4;
+      maxSelection = total - 1;
+      drawListMenu(F("CALIB MODE"), items, total, menuSelection);
     }
 
-    else if (menuState == 3) { // Calibration Set PPM
+    else if (menuState == 3) { // Set Target Value
+      drawMenuTitle(F("SET TARGET"));
 
-      centerText(F("= SET TARGET ="), 0, 1);
-      display.drawLine(0, 9, 128, 9);
-      
-      display.setCursor(0, 15);
-      display.print(F("Sensor: ")); display.println(sensorNames[selectedSensorIndex]);
+      // Sensor name
+      display.setCursor(2, MNU_START_Y);
+      display.print(F("Snsr: "));
+      display.print(sensorNames[selectedSensorIndex]);
 
-      // Calculate Current Value
+
+
+      // Current value
       float currentVal = 0.0;
       switch(selectedSensorIndex) {
         case 0: currentVal = readCO(); break;
@@ -2288,205 +2382,154 @@ void handleMenu() {
         case 9: currentVal = sensorData.pm1_0; break;
       }
 
-      // Display Current
-
-      display.setCursor(0, 25);
-      display.print(F("Curr: ")); 
-      
-      // Convert Current Reading for Display
       bool native = nativeIsPPB[selectedSensorIndex];
       float displayVal = currentVal;
       String unitStr = "";
-      
       if (selectedSensorIndex >= 7) {
-        displayVal = currentVal; // PM Sensors always ug/m3
         unitStr = F(" ug/m3");
       } else if (whoUnitMode) {
-         // WHO Mode
-         switch(selectedSensorIndex) {
-            case 0: displayVal = convertCOToWHO(currentVal); unitStr = F(" mg/m3"); break;
-            case 1: displayVal = convertCO2ToWHO(currentVal); unitStr = F(" mg/m3"); break;
-            case 2: displayVal = convertO3ToWHO(currentVal); unitStr = F(" ug/m3"); break;
-            case 3: displayVal = convertNH3ToWHO(currentVal); unitStr = F(" mg/m3"); break;
-            case 4: displayVal = convertNO2ToWHO(currentVal); unitStr = F(" ug/m3"); break;
-            case 5: displayVal = convertSO2ToWHO(currentVal); unitStr = F(" ug/m3"); break;
-            case 6: displayVal = convertTVOCToWHO(currentVal); unitStr = F(" ug/m3"); break;
-         }
+        switch(selectedSensorIndex) {
+          case 0: displayVal = convertCOToWHO(currentVal); unitStr = F(" mg/m3"); break;
+          case 1: displayVal = convertCO2ToWHO(currentVal); unitStr = F(" mg/m3"); break;
+          case 2: displayVal = convertO3ToWHO(currentVal); unitStr = F(" ug/m3"); break;
+          case 3: displayVal = convertNH3ToWHO(currentVal); unitStr = F(" mg/m3"); break;
+          case 4: displayVal = convertNO2ToWHO(currentVal); unitStr = F(" ug/m3"); break;
+          case 5: displayVal = convertSO2ToWHO(currentVal); unitStr = F(" ug/m3"); break;
+          case 6: displayVal = convertTVOCToWHO(currentVal); unitStr = F(" ug/m3"); break;
+        }
       } else {
-        // EPA Mode
         if (displayInPPB && !native) displayVal *= 1000.0;
         else if (!displayInPPB && native) displayVal /= 1000.0;
         unitStr = (displayInPPB ? F(" ppb") : F(" ppm"));
       }
-      
+
+      display.setCursor(2, MNU_START_Y + 12);
+      display.print(F("Curr: "));
       display.print(displayVal, 1);
-      display.println(unitStr);
+      display.print(unitStr);
 
-      
-      
-      // Display Target
-      display.setCursor(0, 35);
-      display.print(F("Tgt:  ")); 
-      
+      // Target value inside a card box
       float tgtDisplay = targetPPM;
-      String tgtUnitStr = "";
-      
+      String tgtUnit = "";
       if (selectedSensorIndex >= 7) {
-         tgtDisplay = targetPPM;
-         tgtUnitStr = F(" ug/m3");
+        tgtUnit = F(" ug/m3");
       } else if (whoUnitMode) {
-         // WHO Mode Target Conversion
-         switch(selectedSensorIndex) {
-            case 0: tgtDisplay = convertCOToWHO(targetPPM); tgtUnitStr = F(" mg/m3"); break;
-            case 1: tgtDisplay = convertCO2ToWHO(targetPPM); tgtUnitStr = F(" mg/m3"); break;
-            case 2: tgtDisplay = convertO3ToWHO(targetPPM); tgtUnitStr = F(" ug/m3"); break;
-            case 3: tgtDisplay = convertNH3ToWHO(targetPPM); tgtUnitStr = F(" mg/m3"); break;
-            case 4: tgtDisplay = convertNO2ToWHO(targetPPM); tgtUnitStr = F(" ug/m3"); break;
-            case 5: tgtDisplay = convertSO2ToWHO(targetPPM); tgtUnitStr = F(" ug/m3"); break;
-            case 6: tgtDisplay = convertTVOCToWHO(targetPPM); tgtUnitStr = F(" ug/m3"); break;
-         }
+        switch(selectedSensorIndex) {
+          case 0: tgtDisplay = convertCOToWHO(targetPPM); tgtUnit = F(" mg/m3"); break;
+          case 1: tgtDisplay = convertCO2ToWHO(targetPPM); tgtUnit = F(" mg/m3"); break;
+          case 2: tgtDisplay = convertO3ToWHO(targetPPM); tgtUnit = F(" ug/m3"); break;
+          case 3: tgtDisplay = convertNH3ToWHO(targetPPM); tgtUnit = F(" mg/m3"); break;
+          case 4: tgtDisplay = convertNO2ToWHO(targetPPM); tgtUnit = F(" ug/m3"); break;
+          case 5: tgtDisplay = convertSO2ToWHO(targetPPM); tgtUnit = F(" ug/m3"); break;
+          case 6: tgtDisplay = convertTVOCToWHO(targetPPM); tgtUnit = F(" ug/m3"); break;
+        }
       } else {
-         // EPA Mode Target
-         if (displayInPPB && !native) tgtDisplay *= 1000.0;
-         else if (!displayInPPB && native) tgtDisplay /= 1000.0;
-         tgtUnitStr = (displayInPPB ? F(" ppb") : F(" ppm"));
+        if (displayInPPB && !native) tgtDisplay *= 1000.0;
+        else if (!displayInPPB && native) tgtDisplay /= 1000.0;
+        tgtUnit = (displayInPPB ? F(" ppb") : F(" ppm"));
       }
-      
-      display.print(tgtDisplay, 1);
-      display.println(tgtUnitStr);
 
-      
-      centerText(F("[Click for Options]"), 55, 1);
+      int tgtY = MNU_START_Y + 24;
+      display.setCursor(2, tgtY);
+      display.print(F("Tgt: "));
+      display.print(tgtDisplay, 1);
+      display.print(tgtUnit);
+
+      // Hint at bottom
+      centerText(F("< Rotate >  Click"), 55, 1);
+
       maxSelection = 10000;
     }
-    else if (menuState == 31) { // Confirm Calibration Action
-       centerText(F("= ACTION ="), 0, 1);
-       display.drawLine(0, 9, 128, 9);
-       
-       const char* actItems[] = {"1. Save & Exit", "2. Continue Edit", "3. Exit (No Save)"};
-       int totalItems = 3;
-       maxSelection = totalItems - 1;
-       
-       for(int i=0; i<totalItems; i++) {
-         int y = startY + (i * lineHeight);
-         display.setCursor(0, y);
-         if(i == menuSelection) display.print(F("> ")); else display.print(F("  "));
-         display.print(actItems[i]);
-       }
+
+    else if (menuState == 31) { // Confirm Action
+      const char* items[] = {"Save & Exit", "Continue Edit", "Exit (No Save)"};
+      int total = 3;
+      maxSelection = total - 1;
+      drawListMenu(F("CONFIRM"), items, total, menuSelection);
     }
 
-
-
-
-    else if (menuState == 5) { // Network Config Submenu
-      centerText(F("= NET CONFIG ="), 0, 1);
-      display.drawLine(0, 9, 128, 9);
-
-      const char* netItems[] = {"1. Status", "2. SSID", "3. Password", "4. Back"};
-      int totalItems = 4;
-      maxSelection = totalItems - 1;
-      
-      for(int i=0; i<totalItems; i++) {
-        int y = startY + (i * lineHeight);
-        display.setCursor(0, y);
-        if(i == menuSelection) display.print(F("> ")); else display.print(F("  "));
-        display.print(netItems[i]);
-      }
+    else if (menuState == 5) { // Network Config
+      const char* items[] = {"Status", "SSID", "Password", "Back"};
+      int total = 4;
+      maxSelection = total - 1;
+      drawListMenu(F("NETWORK"), items, total, menuSelection);
     }
+
     else if (menuState == 51) { // Net: Status
-       centerText(F("= NET STATUS ="), 0, 1);
-       display.drawLine(0, 9, 128, 9);
-       centerText(wifi_status ? F("Connected") : F("Disconnected"), 25, 1);
-       centerText(F("[Click to Back]"), 50, 1);
+      drawMenuTitle(F("NET STATUS"));
+      int cy = 28;
+      display.drawRFrame(14, cy - 2, 100, 14, 4);
+      centerText(wifi_status ? F("Connected") : F("Disconnected"), cy, 1);
+      drawMenuHint(F("Click > Back"));
     }
+
     else if (menuState == 52) { // Net: SSID
-       centerText(F("= SSID ="), 0, 1);
-       display.drawLine(0, 9, 128, 9);
-       centerText(F("SSID: JIOFI_xxxx"), 20, 1);
-       centerText(F("(View Only)"), 35, 1);
-       centerText(F("[Click to Back]"), 50, 1);
+      drawMenuTitle(F("SSID"));
+      centerText(F("JIOFI_xxxx"), 24, 1);
+      centerText(F("(View Only)"), 36, 1);
+      drawMenuHint(F("Click > Back"));
     }
+
     else if (menuState == 53) { // Net: Password
-       centerText(F("= PASSWORD ="), 0, 1);
-       display.drawLine(0, 9, 128, 9);
-       centerText(F("Pass: ********"), 20, 1);
-       centerText(F("(View Only)"), 35, 1);
-       centerText(F("[Click to Back]"), 50, 1);
+      drawMenuTitle(F("PASSWORD"));
+      centerText(F("********"), 24, 1);
+      centerText(F("(View Only)"), 36, 1);
+      drawMenuHint(F("Click > Back"));
     }
+
     else if (menuState == 6) { // Reset
-       centerText(F("= RESET ="), 0, 1);
-       display.drawLine(0, 9, 128, 9);
-       
-        const char* rstItems[] = {"1. System Reboot", "2. Reset Params", "3. Back"};
-        int totalItems = 3;
-        maxSelection = totalItems - 1;
-        
-        for(int i=0; i<totalItems; i++) {
-           int y = 20 + (i * lineHeight);
-           display.setCursor(0, y);
-           if(i == menuSelection) display.print(F("> ")); else display.print(F("  "));
-           display.print(rstItems[i]);
-        }
+      const char* items[] = {"Sys Reboot", "Reset Params", "Back"};
+      int total = 3;
+      maxSelection = total - 1;
+      drawListMenu(F("RESET"), items, total, menuSelection);
     }
+
     else if (menuState == 7) { // About
-       centerText(F("= ABOUT ="), 0, 1);
-       display.drawLine(0, 9, 128, 9);
-       centerText(F("AQI Monitor v1.2"), 20, 1);
-       centerText(F("Dev: Mega + ESP32"), 32, 1);
-       centerText(F("[Click to Back]"), 50, 1);
+      drawMenuTitle(F("ABOUT"));
+      centerText(F("AQI Monitor v2.0"), 16, 1);
+      // Dashed separator
+      for (int dx = 10; dx < 118; dx += 4) {
+        display.drawPixel(dx, 26);
+      }
+      centerText(F("MCU: Mega+ESP32"), 30, 1);
+      centerText(F("Font: ProFont"), 41, 1);
+      drawMenuHint(F("Click > Back"));
     }
+
     else if (menuState == 9) { // Unit System
-       centerText(F("= UNIT SYSTEM ="), 0, 1);
-       display.drawLine(0, 9, 128, 9);
-       
-       // Create a list menu structure
-       const char* unitItems[] = {
-         whoUnitMode ? "Mode: WHO (ug/m3)" : "Mode: EPA (ppm)", 
-         "Back"
-       };
-       int totalItems = 2;
-       maxSelection = totalItems - 1;
-       
-       for(int i=0; i<totalItems; i++) {
-          int y = 20 + (i * lineHeight); // Start a bit lower
-          display.setCursor(0, y);
-          if(i == menuSelection) display.print(F("> ")); else display.print(F("  "));
-          display.print(unitItems[i]);
-       }
+      drawMenuTitle(F("UNITS"));
+      const char* modeStr = whoUnitMode ? "EPA/WHO: WHO" : "EPA/WHO: EPA";
+      int total = 2;
+      maxSelection = total - 1;
+      // Item 0: mode toggle
+      drawMenuItem(modeStr, MNU_START_Y + 5, menuSelection == 0);
+      // Item 1: back
+      drawMenuItem("Back", MNU_START_Y + 5 + MNU_LINE_H, menuSelection == 1);
+
     }
+
     else if (menuState == 8) { // Sensor Enable/Disable
-       centerText(F("= SENSORS ="), 0, 1);
-       display.drawLine(0, 9, 128, 9);
-       
-       const char* sensorLabels[] = {"CO", "CO2", "O3", "NH3", "NO2", "SO2", "TVOC", "PM10", "PM2.5", "PM1.0", "Back"};
-       int totalItems = 11; // 10 sensors + Back
-       maxSelection = totalItems - 1;
-       
-       // Scrolling window (5 visible items)
-       int windowSize = 5;
-       int startIdx = 0;
-       if (menuSelection >= windowSize) startIdx = menuSelection - windowSize + 1;
-       
-       for(int i = 0; i < windowSize; i++) {
-         int idx = startIdx + i;
-         if (idx < totalItems) {
-           int y = startY + (i * lineHeight);
-           display.setCursor(0, y);
-           if (idx == menuSelection) display.print(F("> ")); else display.print(F("  "));
-           
-           if (idx < NUM_SENSORS) {
-             // Show sensor name with ON/OFF status
-             display.print(sensorLabels[idx]);
-             // Right-align the status
-             int labelLen = strlen(sensorLabels[idx]);
-             int padding = 10 - labelLen; // Pad to column 10
-             for (int p = 0; p < padding; p++) display.print(F(" "));
-             display.print(sensorEnabled[idx] ? F("[ON]") : F("[OFF]"));
-           } else {
-             display.print(sensorLabels[idx]); // "Back"
-           }
-         }
-       }
+      drawMenuTitle(F("SENSORS"));
+      int total = 11; // 10 sensors + Back
+      maxSelection = total - 1;
+      int startIdx = 0;
+      if (menuSelection >= MNU_VISIBLE) startIdx = menuSelection - MNU_VISIBLE + 1;
+      const char* sLabels[] = {"CO","CO2","O3","NH3","NO2","SO2","TVOC","PM10","PM2.5","PM1.0","Back"};
+      for (int i = 0; i < MNU_VISIBLE; i++) {
+        int idx = startIdx + i;
+        if (idx < total) {
+          int y = MNU_START_Y + (i * MNU_LINE_H);
+          if (idx < NUM_SENSORS) {
+            // Build label with status: "CO       [ON]"
+            char buf[20];
+            snprintf(buf, sizeof(buf), "%-6s %s", sLabels[idx], sensorEnabled[idx] ? "[ON]" : "[OFF]");
+            drawMenuItem(buf, y, idx == menuSelection);
+          } else {
+            drawMenuItem(sLabels[idx], y, idx == menuSelection);
+          }
+        }
+      }
+      drawScrollbar(menuSelection, total, MNU_VISIBLE);
     }
 
     display.sendBuffer();
@@ -2557,23 +2600,28 @@ void checkEncoder() {
       
       if (menuState == 0) { // Open Menu
         menuActive = true;
+        animateMenuOpen();
         menuState = 1;
         menuSelection = 0;
       }
       else if (menuState == 1) { // Main Menu
-        if (menuSelection == 0) { menuState = 2; menuSelection = 0; } // Calib (Note: previously was 21, check logic)
-        else if (menuSelection == 1) { menuState = 8; menuSelection = 0; } // Sensors
-        else if (menuSelection == 2) { menuState = 5; menuSelection = 0; } // Net Config
-        else if (menuSelection == 3) { menuState = 9; menuSelection = 0; } // Unit System
-        else if (menuSelection == 4) { menuState = 10; menuSelection = 0; } // SD Card
-        else if (menuSelection == 5) { menuState = 6; menuSelection = 0; } // Reset
-        else if (menuSelection == 6) { menuState = 7; } // About
-        else if (menuSelection == 7) { 
+        if (menuSelection == 7) { 
+           // Exit menu
+           animateMenuClose();
            menuActive = false; 
            menuState = 0; 
            display.clearBuffer(); 
            esp32_fail_count = 0;
-        } // Exit
+        } else {
+           animateWipe(true);
+           if (menuSelection == 0) { menuState = 2; menuSelection = 0; }
+           else if (menuSelection == 1) { menuState = 8; menuSelection = 0; }
+           else if (menuSelection == 2) { menuState = 5; menuSelection = 0; }
+           else if (menuSelection == 3) { menuState = 9; menuSelection = 0; }
+           else if (menuSelection == 4) { menuState = 10; menuSelection = 0; }
+           else if (menuSelection == 5) { menuState = 6; menuSelection = 0; }
+           else if (menuSelection == 6) { menuState = 7; }
+        }
       }
       else if (menuState == 10) { // SD Card Menu
           if (menuSelection == 0) { // Status
@@ -2594,11 +2642,12 @@ void checkEncoder() {
              sendSDCommand("CMD:SD_FMT", "Format Done");
           }
           else if (menuSelection == 4) { // Back
+             animateWipe(false);
              menuState = 1; menuSelection = 4;
           }
       }
       else if (menuState == 2) { // Sensor Select
-        if (menuSelection == 10) { menuState = 1; menuSelection = 0; } // Back
+        if (menuSelection == 10) { animateWipe(false); menuState = 1; menuSelection = 0; } // Back
         else {
            selectedSensorIndex = menuSelection;
            menuState = 21; // Go to Options
@@ -2636,7 +2685,8 @@ void checkEncoder() {
              menuState = 3;
          }
          else { // Back
-             menuState = 2; menuSelection = 0;
+             animateWipe(false);
+             menuState = 2; menuSelection = selectedSensorIndex;
          }
       }
 
@@ -2663,7 +2713,7 @@ void checkEncoder() {
          if (menuSelection == 0) menuState = 51; // Status
          else if (menuSelection == 1) menuState = 52; // SSID
          else if (menuSelection == 2) menuState = 53; // Pass
-         else if (menuSelection == 3) { menuState = 1; menuSelection = 2; } // Back to main (Net Config index)
+         else if (menuSelection == 3) { animateWipe(false); menuState = 1; menuSelection = 2; } // Back
       }
       else if (menuState == 51 || menuState == 52 || menuState == 53) {
          menuState = 5; // Back to Net Menu
@@ -2681,13 +2731,15 @@ void checkEncoder() {
              resetCalibration();
          }
          else if (menuSelection == 2) { // Back
+             animateWipe(false);
              menuState = 1; 
-             menuSelection = 4; 
+             menuSelection = 5; 
          } 
       }
 
       else if (menuState == 7) { // About Back
-         menuState = 1; menuSelection = 5; // Back to main (About index was 4, now 5)
+         animateWipe(false);
+         menuState = 1; menuSelection = 6;
       }
       else if (menuState == 9) { // Unit System List
          if (menuSelection == 0) {
@@ -2697,6 +2749,7 @@ void checkEncoder() {
          } 
          else if (menuSelection == 1) {
             // Back
+            animateWipe(false);
             menuState = 1; menuSelection = 3;
          }
          redraw = true;
@@ -2711,6 +2764,7 @@ void checkEncoder() {
            Serial.println(sensorEnabled[menuSelection] ? F(" ENABLED") : F(" DISABLED"));
          } else {
            // Back
+           animateWipe(false);
            menuState = 1; menuSelection = 1;
          }
       }

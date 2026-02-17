@@ -1,0 +1,50 @@
+# AQI Monitoring System - Field Calibration Guide
+
+## ⚠️ CRITICAL WARNINGS
+- **CO2 Sensor (MQ-135):** NEVER use "Zero Calibration". CO2 is never 0 ppm (outdoor average is ~420 ppm). Zeroing it will cause dangerously low readings indoors.
+- **Warm-up:** Sensors must run for **30+ minutes** before ANY calibration.
+
+---
+
+## Which Mode Should You Use? (The Strategy)
+
+Since you do not have a lab, rely primarily on **Mode 3 (R0)** and **Mode 2 (Span)**.
+
+### 1. For First Setup: "Fresh Air" Calibration
+**Use Mode:** Option 3 (R0 / Baseline)
+**Why:** This recalibrates the sensor's physical reference point ($R_0$) to align with known clean air levels. It is far more accurate than simple offsets for non-linear MQ sensors.
+**Procedure:**
+1. Take the device **outside** in clean air (30+ mins warm-up).
+2. Select **R0 / Baseline** for each sensor.
+3. Enter the **Target Values** listed below.
+4. Save. This "teaches" the sensor what clean air looks like.
+
+### 2. For Fine-Tuning: Matching a Government Station
+**Use Mode:** Option 2 (Span Cal)
+**Why:** If a nearby official station says PM2.5 is "45" but yours says "38", use this to scale your reading up without altering the physics curve.
+**Procedure:**
+1. Stand near the Reference Station.
+2. Select **Span Cal**.
+3. Dial in the Target to match the station's reading.
+4. Save. This applies a linear multiplier (Gain).
+
+### 3. When to use Option 1 (Zero Cal)?
+**Use Mode:** Option 1 (Zero Cal)
+**Why:** Only for sensors that truly read 0 in clean air but have drifted to show a false positive.
+**Example:** If Carbon Monoxide (CO) reads 5ppm in fresh air, use Zero Cal to force it to 0.
+
+---
+
+## Recommended Target Values for "Field Calibration"
+Use these values when you are **outside in fresh air** and selecting **Mode 3 (R0 / Baseline)**.
+
+| Sensor | Target Value to Input | Reason |
+| :--- | :--- | :--- |
+| **MQ-135 (CO2)** | **415 - 420 ppm** | Critical. Outdoor air is the global baseline. |
+| **MQ-7 (CO)** | **0.0 - 0.1 ppm** | Clean air has virtually no CO. |
+| **MQ-131 (O3)** | **10 - 20 ppb** | Ozone is rarely 0 outdoors (sunlight creates it). |
+| **NO2 (MEMS)** | **5 - 10 ppb** | Trace amounts exist even in "clean" cities. |
+| **VOC (MEMS)** | **50 - 100 ppb** | Plants emit natural VOCs; 0 is unrealistic. |
+| **MQ-2 (SO2)** | **0 ppb** | Combustible gases should be 0. |
+| **MQ-137 (NH3)** | **0 ppm** | Ammonia should be 0. |
+| **PM 2.5 / 10** | **Check Weather App** | Look up local AQI. If app says 15 µg/m³, enter 15. |
